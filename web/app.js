@@ -752,16 +752,20 @@
     // 代理框和访问地址是两码事，容易被混为一谈，所以这里分开写清楚
     const lanUrls = ac.lan_urls || [];
     const lanBlock = ac.open_to_lan
-      ? `<div class="kv" style="margin-top:8px">局域网访问（在别的机器浏览器里打开）：</div>
-         ${lanUrls.length
-           ? `<div class="kv">${lanUrls.map((u, i) => `<code>${esc(u)}</code>${
-               i === 0 ? ' <span style="color:var(--muted)">← 最可能是这个</span>' : ''
-             }`).join('<br>')}</div>
-              <div class="kv" style="margin-top:6px;color:var(--muted)">
-                装了虚拟机 / VPN / Clash TUN 的机器会有多个网卡，连不上就换一个试。
-                实在不确定，去路由器后台看这台机器的 IP。
+      ? `${!ac.from_localhost && ac.current_url
+           ? `<div class="notice" style="margin:8px 0 0;background:var(--accent-soft);border:1px solid var(--accent)">
+                你现在就是通过 <code>${esc(ac.current_url)}</code> 打开这个页面的，
+                别的机器用<b>这个地址</b>就行。
               </div>`
-           : `<div class="kv" style="color:var(--muted)">（没探测到可用的局域网 IP）</div>`}
+           : ''}
+         <div class="kv" style="margin-top:8px">本机探测到的其它地址（仅供参考）：</div>
+         ${lanUrls.length
+           ? `<div class="kv">${lanUrls.map((u) => `<code>${esc(u)}</code>`).join('<br>')}</div>`
+           : `<div class="kv" style="color:var(--muted)">（没探测到）</div>`}
+         <div class="kv" style="margin-top:6px;color:var(--muted)">
+           装了 ZeroTier / Radmin / Clash TUN 的机器会多出几个虚拟网卡地址，
+           那些从别的设备连不上。拿不准就在目标机器上逐个试，能打开的就是对的。
+         </div>
          <div class="notice warn" style="margin:10px 0 0">
            这个服务<b>没有任何登录验证</b>。能连上这个地址的人都能看你的收藏夹、观看历史，
            还能下载漫画。只在家里内网用，<b>千万别映射到公网</b>。

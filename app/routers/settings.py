@@ -6,7 +6,7 @@
 
 import socket
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import config
@@ -43,9 +43,17 @@ def _rank(ip: str) -> tuple:
 
 
 def _lan_addresses() -> list[str]:
-    """猜出本机的局域网 IP，好告诉用户别的机器该访问哪个地址。"""
+    """本机所有可能可用的 IPv4 地址。
+
+    刻意**不排"最可能的那个"**：装了 ZeroTier / Radmin / Clash TUN 的机器上，
+    "默认路由出口 IP" 很可能落在虚拟网卡上（实测这台机器就选中了 ZeroTier），
+    任何自动排序都会理直气壮地指错。
+
+    真正可靠的判断是「当前浏览器是用哪个地址打开这个页面的」，
+    见下面 _access_info 里的 current_url。
+    """
     addrs: set[str] = set()
-    # UDP connect 不会真的发包，只是让系统按路由表选出本机的出口 IP
+    # UDP connect 不会真的发包，只是让系统按路由表选出出口 IP
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("223.5.5.5", 80))
@@ -60,28 +68,33 @@ def _lan_addresses() -> list[str]:
     return sorted((ip for ip in addrs if _usable(ip)), key=_rank)
 
 
-def _access_info() -> dict:
+def _access_info(request: Request) -> dict:
     """访问地址。
 
     刻意和「代理」分开展示：这两件事经常被混为一谈。
     ``0.0.0.0`` 是**监听**用的通配地址，不是一个能连过去的地址。
     """
     open_to_lan = config.HOST in ("0.0.0.0", "::")
+    # 浏览器这次是用哪个地址打进来的 —— 这就是"别的机器该用哪个地址"的答案
+    host_header = (request.headers.get("host") or "").strip()
+    current_url = f"http://{host_header}" if host_header else ""
     return {
         "host": config.HOST,
         "port": config.PORT,
         "open_to_lan": open_to_lan,
         "local_url": f"http://127.0.0.1:{config.PORT}",
+        "current_url": current_url,
+        "from_localhost": host_header.startswith(("127.0.0.1", "localhost", "[::1]")),
         "lan_urls": [f"http://{ip}:{config.PORT}" for ip in _lan_addresses()] if open_to_lan else [],
     }
 
 
 @router.get("", summary="读取设置与运行统计")
-def read_settings() -> dict:
+def read_settings(request: Request) -> dict:
     return {
         "proxy": jmclient.effective_proxy_setting(),
         "diagnostics": jmclient.proxy_diagnostics(),
-        "access": _access_info(),
+        "access": _access_info(request),
         "upstream": jmclient.stats(),
     }
 
