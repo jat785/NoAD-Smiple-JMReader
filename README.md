@@ -131,6 +131,7 @@ python3 -m venv .venv      # macOS / Linux（这两台上通常没有 python 这
 | `JMREADER_PAGE_CACHE_MAX_FILES` | `3000` | 在线看图缓存的文件数上限 |
 | `JMREADER_COVER_CACHE_MAX_FILES` | `4000` | 封面缓存的文件数上限 |
 | `JMREADER_SQLITE_JOURNAL` | 空（自动） | 强制 SQLite 日志模式，填 `wal` 或 `delete`。**一般不用动**，见下方「数据库与存储」 |
+| `JMREADER_SECRET_BIND` | 空（自动） | 仅兜底加密用：固定"机器身份"字符串。主机名会变的场景（容器）才需要设 |
 
 > 设置页里改的代理存在数据库里，**优先级高于 `.env`**。
 
@@ -158,7 +159,7 @@ JMReader/
 │   └── app.js
 ├── data/                      运行期数据，已在 .gitignore 中
 │   ├── jmreader.db            索引 + 观看历史 + 密封后的登录凭据（kv 表）
-│   ├── secret.key             仅非 Windows 的 AES 兜底密钥（Windows 上不生成）
+│   ├── secret.key             仅兜底加密用的密钥（Windows/macOS 及有密钥环的 Linux 上不生成）
 │   ├── cache/
 │   │   ├── covers/            封面缓存
 │   │   ├── pages/             在线看图缓存
@@ -228,27 +229,41 @@ JMReader/
 
 ### 「记住密码」是怎么做的
 
-本程序**从不保存明文密码**。勾选「记住密码」后，凭据用下面的机制密封保存：
+本程序**从不保存明文密码**。勾选「记住密码」后，凭据按下面的顺序挑**第一个可用**的
+机制密封保存，强度从高到低：
 
-**Windows：DPAPI（`CryptProtectData`）**
+**1. Windows：DPAPI（`CryptProtectData`）—— 已在 Windows 实测**
 
 - 密钥由 Windows 从**当前用户账户**派生，**不存放在任何文件里**
 - 密文绑定「这台机器 + 这个 Windows 用户」
 - 因此：数据库被拷到别的机器 → **解不开**；同机其它 Windows 用户读到 → **解不开**
 - 通过 `ctypes` 直接调系统 API，**不引入任何新依赖**
 
-**macOS / Linux：AES-256-GCM + 本地密钥文件（未实测，不保证安全）**
+**2. macOS：登录钥匙串（`security` 命令）—— 未实测**
 
-这两个平台上退化为 `data/secret.key` 里的密钥加 AES-256-GCM：
+- 密码交给**系统钥匙串**保存，由 macOS 按你的账户保护
+- **密码根本不写进 `jmreader.db`** —— 库里只有一个标记，拷走数据库也拿不到密码
+- 用的是系统自带命令，不需要装任何东西
 
-- ✅ 能挡住「只拿到 `jmreader.db` 一个文件」的情况（发备份、贴给别人排查）
-- ❌ **挡不住拿到整个 `data/` 目录的人** —— 密钥就在旁边
-- 属于**混淆级别，不是加密级别**
+**3. Linux：Secret Service（`secret-tool`）—— 未实测**
 
-这两个平台正确的做法是 Keychain / Secret Service，**本项目没有实现**。
-界面上会明确标出当前用的是哪一种、以及它是否安全。
+- 密码交给系统密钥环（GNOME Keyring / KWallet 等），同样是**密码不进数据库**
+- 需要系统装了 `libsecret` 且钥匙串守护进程在运行；没有就自动降级到第 4 种
 
-想真正安全，就在 Windows 上跑，或者干脆不要勾选「记住密码」。
+**4. 兜底：AES-256-GCM + 机器绑定的本地密钥**
+
+前三种都不可用时（例如精简的 Linux 容器）才走这条。密钥文件在 `data/secret.key`
+（尽力设成 0600），但用它之前还要**再混入本机身份**（主机名 + 用户名 + home 路径）
+做一次 PBKDF2。所以：
+
+- 单独把 `jmreader.db` 交出去 → 解不开
+- **把整个 `data/` 目录拷到另一台机器 → 同样解不开**（光有密钥文件不够）
+
+它仍然不是操作系统级的保护，属于**混淆级别**；拿到这台机器上同一用户权限的人
+依旧能解密。界面上会如实标出当前用的是哪一种、以及它是否安全。
+
+> 主机名会变的场景（比如容器每次重建都换 hostname）可以用环境变量
+> `JMREADER_SECRET_BIND` 固定一个字符串，否则每次重建都要重新登录一次。
 
 ### 会话过期之后
 

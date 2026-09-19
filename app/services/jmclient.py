@@ -459,7 +459,7 @@ def set_remember(enabled: bool) -> bool:
     db.kv_set(_REMEMBER_KEY, "1" if enabled else "0")
     if not enabled:
         db.kv_delete(_CRED_KEY)
-        secretbox.wipe_key_file()
+        secretbox.wipe()
         return False
     return has_saved_credentials()
 
@@ -525,7 +525,7 @@ def toggle_remember(enabled: bool) -> dict:
     db.kv_set(_REMEMBER_KEY, "1" if enabled else "0")
     if not enabled:
         db.kv_delete(_CRED_KEY)
-        secretbox.wipe_key_file()
+        secretbox.wipe()
         return {"enabled": False, "active": False, "has_credentials": False,
                 "reason": "已关闭，保存的密码已清除"}
 
@@ -608,7 +608,7 @@ def logout() -> None:
     db.kv_delete(_CRED_KEY)
     db.kv_delete(_REMEMBER_KEY)
     db.kv_delete(_FAIL_KEY)
-    secretbox.wipe_key_file()
+    secretbox.wipe()
     with _login_lock:
         _relogin_state.update(
             {"failures": 0, "invalid_since": 0.0, "last_error": "", "last_attempt": 0.0}

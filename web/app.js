@@ -47,7 +47,7 @@
   //
   // 现在按真实状态分两种：存过密码 -> 复选框可自由开关；
   // 没存过 -> 复选框禁用，改为让用户填一次密码来保存。
-  function rememberBox(acc) {
+  function renderRememberSection(acc) {
     const b = acc.secret_backend || null;
     const header = `<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">`;
 
@@ -1010,7 +1010,7 @@
                记住密码，登录失效后自动重新登录
              </label>
              ${rememberNote(acc)}`}
-        ${acc.logged_in ? rememberBox(acc) : ''}
+        ${acc.logged_in ? renderRememberSection(acc) : ''}
       </div>
 
       <div class="card" style="margin-top:12px">
@@ -1086,13 +1086,13 @@
         const username = document.getElementById('u').value.trim();
         const password = document.getElementById('p').value;
         if (!username || !password) { toast('请填写用户名和密码'); return; }
-        const rememberBox = document.getElementById('remember-inline');
+        const rememberInline = document.getElementById('remember-inline');
         loginBtn.disabled = true;
         try {
           await apiPost('/api/login', {
-            username, password, remember: !!(rememberBox && rememberBox.checked),
+            username, password, remember: !!(rememberInline && rememberInline.checked),
           });
-          toast(rememberBox && rememberBox.checked ? '登录成功，已记住密码' : '登录成功');
+          toast(rememberInline && rememberInline.checked ? '登录成功，已记住密码' : '登录成功');
           viewSettings();
         } catch (err) {
           toast(`登录失败：${err.message}`);
@@ -1108,12 +1108,12 @@
         viewSettings();
       };
     }
-    const rememberBox = document.getElementById('remember');
-    if (rememberBox) {
-      rememberBox.onchange = async () => {
+    const rememberToggle = document.getElementById('remember');
+    if (rememberToggle) {
+      rememberToggle.onchange = async () => {
         const out = document.getElementById('remember-result');
         try {
-          const r = await apiPost('/api/remember', { enabled: rememberBox.checked });
+          const r = await apiPost('/api/remember', { enabled: rememberToggle.checked });
           if (r.active) {
             out.innerHTML = r.enabled
               ? '<span style="color:var(--accent)">已开启。会话过期后会尝试自动重新登录。</span>'
@@ -1125,7 +1125,7 @@
           viewSettings();
         } catch (err) {
           out.textContent = `保存失败：${err.message}${versionHint(err)}`;
-          rememberBox.checked = !rememberBox.checked;
+          rememberToggle.checked = !rememberToggle.checked;
         }
       };
     }
