@@ -402,52 +402,96 @@ def delete_downloaded(album_id: str) -> None:
 def rescan_library() -> dict:
     """扫描下载目录里的 metadata.json，重建索引。
 
-    用户手动搬动/改名过下载目录时，用这个把数据库修复回来。
+    返回值刻意带上诊断信息：磁盘上发现了什么、每个文件写库成功没有、
+    写完**立刻回读**又能看到几行。
+
+    「扫描说 4 部、列表只显示 1 部」这类问题，光看 added/skipped 是查不出来的 ——
+    写入端和读取端必须分别给出数字，才能判断是写丢了、被合并了，还是前端没刷新。
     """
-    added, skipped = 0, 0
     root = config.DOWNLOAD_DIR
-    if not root.is_dir():
-        return {"added": 0, "skipped": 0}
+    details: list[dict] = []
+    added, skipped = 0, 0
 
-    for meta_file in root.glob("*/metadata.json"):
-        try:
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            skipped += 1
-            continue
-
-        album_id = str(meta.get("album_id") or "").strip()
-        if not album_id:
-            skipped += 1
-            continue
-
-        album_dir = meta_file.parent
-        cover_name = meta.get("cover") or ""
-        db.upsert_downloaded_album(
-            album_id=album_id,
-            title=str(meta.get("title") or ""),
-            author=str(meta.get("author") or ""),
-            tags=meta.get("tags") or [],
-            dir_path=str(album_dir),
-            cover_path=str(album_dir / cover_name) if cover_name else "",
-        )
-        for rec in meta.get("chapters") or []:
-            if not isinstance(rec, dict) or not rec.get("file"):
+    if root.is_dir():
+        for meta_file in sorted(root.glob("*/metadata.json")):
+            entry: dict = {"dir": meta_file.parent.name, "album_id": "", "ok": False,
+                           "chapters": 0, "reason": ""}
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                entry["reason"] = f"读取/解析失败：{type(exc).__name__}"
+                skipped += 1
+                details.append(entry)
                 continue
-            zip_path = album_dir / str(rec["file"])
-            if not zip_path.exists():
+
+            album_id = str(meta.get("album_id") or "").strip()
+            entry["album_id"] = album_id
+            if not album_id:
+                entry["reason"] = "metadata.json 里没有 album_id"
+                skipped += 1
+                details.append(entry)
                 continue
-            db.upsert_downloaded_chapter(
-                album_id=album_id,
-                chapter_id=str(rec.get("chapter_id") or ""),
-                chapter_index=int(rec.get("index") or 0),
-                title=str(rec.get("title") or ""),
-                zip_path=str(zip_path),
-                page_count=int(rec.get("page_count") or 0),
-            )
-        db.refresh_downloaded_album_stats(album_id)
-        added += 1
-    return {"added": added, "skipped": skipped}
+
+            album_dir = meta_file.parent
+            cover_name = meta.get("cover") or ""
+            try:
+                db.upsert_downloaded_album(
+                    album_id=album_id,
+                    title=str(meta.get("title") or ""),
+                    author=str(meta.get("author") or ""),
+                    tags=meta.get("tags") or [],
+                    dir_path=str(album_dir),
+                    cover_path=str(album_dir / cover_name) if cover_name else "",
+                )
+                for rec in meta.get("chapters") or []:
+                    if not isinstance(rec, dict) or not rec.get("file"):
+                        continue
+                    zip_path = album_dir / str(rec["file"])
+                    if not zip_path.exists():
+                        continue
+                    db.upsert_downloaded_chapter(
+                        album_id=album_id,
+                        chapter_id=str(rec.get("chapter_id") or ""),
+                        chapter_index=int(rec.get("index") or 0),
+                        title=str(rec.get("title") or ""),
+                        zip_path=str(zip_path),
+                        page_count=int(rec.get("page_count") or 0),
+                    )
+                    entry["chapters"] += 1
+                db.refresh_downloaded_album_stats(album_id)
+                entry["ok"] = True
+                added += 1
+            except Exception as exc:  # noqa: BLE001 —— 单个本子失败不该拖垮整个扫描
+                entry["reason"] = f"写库失败：{type(exc).__name__}: {exc}"
+                skipped += 1
+            details.append(entry)
+
+    # 写完立刻回读，直接把"写进去了没有"验证掉
+    after = db.list_downloaded_albums(limit=1000)
+
+    # 有没有多个目录解析出同一个 album_id？
+    # album_id 是主键，重复的话会被 upsert 合并成一行 ——
+    # 表象就是"磁盘上 4 个，列表只有 1 个"，而且 added 还是 4，极具迷惑性。
+    ids = [d["album_id"] for d in details if d["ok"]]
+    duplicates = sorted({i for i in ids if ids.count(i) > 1})
+
+    result = {
+        "added": added,
+        "skipped": skipped,
+        "disk_count": len(details),
+        "total_after": len(after),
+        "download_dir": str(root),
+        "db_path": str(config.DB_PATH),
+        "albums": [
+            {"album_id": a["album_id"], "title": (a.get("title") or "")[:40],
+             "chapters": a.get("chapter_count")}
+            for a in after
+        ],
+        "details": details,
+    }
+    if duplicates:
+        result["duplicate_album_ids"] = duplicates
+    return result
 
 
 # ------------------------------------------------------------------ 从 ZIP 读图

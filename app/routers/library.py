@@ -15,7 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 
-from .. import db
+from .. import config, db
 from ..services import downloader
 
 router = APIRouter(prefix="/api", tags=["library"])
@@ -74,7 +74,18 @@ def list_library(
             if keyword in (it.get("title") or "").lower()
             or keyword in (it.get("author") or "").lower()
         ]
-    return {"items": items, "count": len(items)}
+
+    # 顺带数一下磁盘上有几部（只 glob 一层，很快）。
+    # 有了这个数，列表就能自己发现"磁盘上有 4 部、索引里只有 1 部"，
+    # 而不是静悄悄地显示空列表让人以为是 bug。
+    disk_count = 0
+    try:
+        if config.DOWNLOAD_DIR.is_dir():
+            disk_count = sum(1 for _ in config.DOWNLOAD_DIR.glob("*/metadata.json"))
+    except OSError:
+        pass
+
+    return {"items": items, "count": len(items), "disk_count": disk_count}
 
 
 @router.post("/library/rescan", summary="重新扫描下载目录，修复索引")

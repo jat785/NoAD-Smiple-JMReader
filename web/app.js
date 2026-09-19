@@ -33,7 +33,9 @@
   function onCleanup(fn) { cleanups.push(fn); }
 
   async function api(path, options) {
-    const res = await fetch(path, options);
+    // no-store：这些全是实时数据，一旦被浏览器或中间代理复用旧响应，
+    // 就会变成「扫描到 4 部、列表却只有 1 部」这种极难排查的幽灵问题
+    const res = await fetch(path, { cache: 'no-store', ...options });
     const text = await res.text();
     let data = null;
     if (text) { try { data = JSON.parse(text); } catch { data = null; } }
@@ -633,7 +635,7 @@
     };
   }
 
-  async function viewLibrary() {
+  async function viewLibrary(diag) {
     setMain('<div class="loading">加载中…</div>');
     const data = await apiGet('/api/library');
     const items = data.items.map((it) => ({
@@ -642,9 +644,52 @@
       author: it.author,
       // 本地库的 tags 来自我们自己写的 metadata.json，是真实标签
       tags: it.tags || [],
-      adddate: `${it.chapter_count} 话 · ${(it.size_bytes / 1048576).toFixed(1)} MB`,
+      adddate: `${it.chapter_count} 话 · ${((it.size_bytes || 0) / 1048576).toFixed(1)} MB`,
       cover: `/api/library/${it.album_id}/cover`,
     }));
+
+    // 扫描诊断：磁盘数、写库数、回读数三个数字摆在一起，对不上就一眼看得出来
+    let diagHtml = '';
+    if (diag) {
+      const ok = diag.total_after === diag.disk_count;
+      const bad = (diag.details || []).filter((d) => !d.ok);
+      diagHtml = `
+        <div class="notice ${ok ? '' : 'warn'}"
+             style="${ok ? 'background:transparent;border:1px solid var(--line);' : ''}">
+          扫描结果：磁盘上 <b>${diag.disk_count}</b> 个 · 成功写库 <b>${diag.added}</b> 个
+          · 跳过 <b>${diag.skipped}</b> 个 · 写完回读索引 <b>${diag.total_after}</b> 部
+          ${ok ? '' : '<br><b>磁盘数和索引数对不上，问题就出在这一步。</b>'}
+          <br><span style="color:var(--muted)">
+            下载目录：<code>${esc(diag.download_dir)}</code><br>
+            索引文件：<code>${esc(diag.db_path)}</code>
+          </span>
+          ${(diag.duplicate_album_ids || []).length ? `
+            <div style="margin-top:8px">
+              <b>发现重复的 JM 号：</b>
+              <code>${(diag.duplicate_album_ids || []).map(esc).join(', ')}</code><br>
+              JM 号是索引的主键，重复的目录会被合并成一条 —— 这就是为什么磁盘上更多、
+              列表里更少。多半是同一个本子被下载/复制了两份。
+            </div>` : ''}
+          ${bad.length ? `
+            <details style="margin-top:8px">
+              <summary style="cursor:pointer">有 ${bad.length} 个没写进去，点开看原因</summary>
+              <div style="margin-top:6px">${bad.map((d) => `
+                ❌ <code>${esc(d.dir)}</code> → ${esc(d.reason || '未知原因')}<br>
+                　 解析出的 album_id = <code>${esc(d.album_id || '(空)')}</code>
+              `).join('')}</div>
+            </details>` : ''}
+        </div>`;
+    }
+
+    // 索引落后于磁盘时主动提示，而不是静悄悄显示空列表
+    let lagHtml = '';
+    if (!diag && data.disk_count > data.count) {
+      lagHtml = `
+        <div class="notice warn">
+          磁盘上下载目录里有 <b>${data.disk_count}</b> 部，但索引里只有 <b>${data.count}</b> 部。
+          索引落后了 —— 点上面的「重新扫描下载目录」重建一下就好。
+        </div>`;
+    }
 
     setMain(`
       <h1 class="page-title">本地已下载 <small>${data.count} 部</small></h1>
@@ -652,13 +697,20 @@
         <button class="btn" id="rescan">重新扫描下载目录</button>
         <span class="kv">存放在 data/downloads/</span>
       </div>
+      ${diagHtml}
+      ${lagHtml}
       ${comicList(items, { href: (it) => `#/library/${it.album_id}` })}
     `);
     document.getElementById('rescan').onclick = async (ev) => {
       ev.target.disabled = true;
-      const r = await apiPost('/api/library/rescan');
-      toast(`扫描完成：${r.added} 部，跳过 ${r.skipped}`);
-      viewLibrary();
+      try {
+        const r = await apiPost('/api/library/rescan');
+        toast(`扫描完成：磁盘 ${r.disk_count} 个 / 写库 ${r.added} 个 / 索引 ${r.total_after} 部`);
+        await viewLibrary(r);          // 把诊断一起带回去，刷新后直接显示
+      } catch (err) {
+        toast(`扫描失败：${err.message}`);
+        ev.target.disabled = false;
+      }
     };
   }
 

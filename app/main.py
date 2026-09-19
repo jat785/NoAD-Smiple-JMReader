@@ -45,13 +45,21 @@ app.include_router(settings.router)
 
 
 @app.middleware("http")
-async def _force_utf8_charset(request: Request, call_next):
-    """给文本类响应补上 ``charset=utf-8``。
+async def _api_response_headers(request: Request, call_next):
+    """统一处理 API 响应头。
+
+    1. 给文本类响应补 ``charset=utf-8``。
 
     JSON 按 RFC 8259 本来就是 UTF-8，浏览器也默认按 UTF-8 解析，
     但不少客户端（比如 PowerShell 的 Invoke-RestMethod）在没有 charset 时会
     退化成 Latin-1，把「劇情向」解成 9 个乱码字符，进而导致标签搜索搜不到东西。
     ``application/javascript`` 同理 —— 浏览器没事，脚本/命令行工具会中招。
+
+    2. API 一律禁用缓存。
+
+    这些都是实时数据。万一被浏览器或中间代理复用旧响应，就会变成
+    「明明扫描到 4 部，列表却只有 1 部」这种极难排查的幽灵问题 ——
+    现象看着像后端 bug，实际数据早就写进去了。
     """
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
@@ -60,6 +68,10 @@ async def _force_utf8_charset(request: Request, call_next):
         or content_type.startswith("application/javascript")
     ):
         response.headers["content-type"] = f"{content_type}; charset=utf-8"
+
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
     return response
 
 
