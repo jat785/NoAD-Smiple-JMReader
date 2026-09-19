@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>JMReader</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-layout="grid" data-view="auto">
+<header class="topbar">
+  <button type="button" id="btn-back" class="backbtn" hidden title="返回上一页">← 返回</button>
+  <a class="brand" href="#/">JMReader</a>
+  <form class="searchbox" id="search-form">
+    <select id="search-by" title="搜索类型">
+      <option value="site">关键词 / JM 号</option>
+      <option value="tag">标签</option>
+      <option value="author">作者</option>
+      <option value="work">作品</option>
+      <option value="actor">人物</option>
+    </select>
+    <input id="search-q" type="search" placeholder="搜索关键词，或输入 jm 号精确定位" autocomplete="off">
+    <button type="submit">搜索</button>
+  </form>
+  <nav class="nav">
+    <a href="#/">首页</a>
+    <a href="#/tags">标签</a>
+    <a href="#/discover">发现</a>
+    <a href="#/favorites">收藏</a>
+    <a href="#/history">历史</a>
+    <a href="#/library">本地</a>
+    <a href="#/tasks">下载</a>
+    <a href="#/settings">设置</a>
+  </nav>
+  <span class="toggles">
+    <button type="button" id="btn-layout" title="切换排版">▦ 网格</button>
+    <button type="button" id="btn-theme" title="切换主题">◐ 跟随系统</button>
+  </span>
+</header>
+
+<main id="app"><div class="loading">加载中…</div></main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

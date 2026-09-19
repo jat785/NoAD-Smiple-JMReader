@@ -1,0 +1,4 @@
+# 直接依赖。其余依赖（Pillow、curl-cffi、pycryptodome 等）由 jmcomic 自动带入。
+jmcomic==2.7.7
+fastapi==0.141.1
+uvicorn[standard]==0.53.0

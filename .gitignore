@@ -1,0 +1,28 @@
+# ---- 本地虚拟环境：绝不提交 ----
+.venv/
+venv/
+env/
+
+# ---- Python 产物 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 运行期数据：含登录 Cookie / 数据库 / 下载内容，绝不提交 ----
+# 用 data/* 而不是 data/：后者会把整个目录排除掉，
+# 导致 !data/.gitkeep 这条反排除失效，克隆下来就没有 data 目录。
+data/*
+!data/.gitkeep
+
+# ---- 本地配置（可能含账号） ----
+.env
+config.local.json
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

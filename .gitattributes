@@ -1,0 +1,21 @@
+# 统一换行符，避免脚本跨平台失效。
+# 不加这个的话，Windows 上提交的 run.sh 带到 Linux 会变成 CRLF，
+# 执行时报 "bad interpreter: /bin/bash^M" —— 这种错很难一眼看出来。
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd 可能解析异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# shell 脚本必须是 LF
+*.sh text eol=lf
+
+# 二进制文件不要做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.db binary
