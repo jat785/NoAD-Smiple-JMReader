@@ -1,12 +1,15 @@
-"""设置：代理配置与运行统计。
+"""设置：代理配置、访问地址与运行统计。
 
 代理是个绕不开的运维问题 —— 有人要挂 Clash，有人直连就行，有人在公司网络里
 必须走指定代理。所以做成设置页可改，而不是写死在配置文件里让每个人去翻文档。
 """
 
+import socket
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from .. import config
 from ..services import jmclient
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -17,11 +20,68 @@ class ProxyPayload(BaseModel):
     url: str = ""
 
 
+# 这些网段列出来只会误导人：
+#   198.18/198.19 —— Clash TUN 的 fake-ip 网关，从别的机器连不上
+#   169.254       —— link-local，没意义
+#   127.          —— 本机回环
+_UNUSABLE_PREFIXES = ("198.18.", "198.19.", "169.254.", "127.")
+
+
+def _usable(ip: str) -> bool:
+    return bool(ip) and not ip.startswith(_UNUSABLE_PREFIXES)
+
+
+def _rank(ip: str) -> tuple:
+    """把最可能是"真实局域网地址"的排前面。"""
+    if ip.startswith("192.168."):
+        return (0, ip)
+    if ip.startswith("10."):
+        return (1, ip)
+    if ip.startswith("172."):
+        return (2, ip)
+    return (3, ip)
+
+
+def _lan_addresses() -> list[str]:
+    """猜出本机的局域网 IP，好告诉用户别的机器该访问哪个地址。"""
+    addrs: set[str] = set()
+    # UDP connect 不会真的发包，只是让系统按路由表选出本机的出口 IP
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("223.5.5.5", 80))
+            addrs.add(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addrs.add(info[4][0])
+    except OSError:
+        pass
+    return sorted((ip for ip in addrs if _usable(ip)), key=_rank)
+
+
+def _access_info() -> dict:
+    """访问地址。
+
+    刻意和「代理」分开展示：这两件事经常被混为一谈。
+    ``0.0.0.0`` 是**监听**用的通配地址，不是一个能连过去的地址。
+    """
+    open_to_lan = config.HOST in ("0.0.0.0", "::")
+    return {
+        "host": config.HOST,
+        "port": config.PORT,
+        "open_to_lan": open_to_lan,
+        "local_url": f"http://127.0.0.1:{config.PORT}",
+        "lan_urls": [f"http://{ip}:{config.PORT}" for ip in _lan_addresses()] if open_to_lan else [],
+    }
+
+
 @router.get("", summary="读取设置与运行统计")
 def read_settings() -> dict:
     return {
         "proxy": jmclient.effective_proxy_setting(),
         "diagnostics": jmclient.proxy_diagnostics(),
+        "access": _access_info(),
         "upstream": jmclient.stats(),
     }
 

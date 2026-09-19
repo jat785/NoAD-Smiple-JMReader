@@ -746,7 +746,35 @@
     const [acc, st] = await Promise.all([apiGet('/api/account'), apiGet('/api/settings')]);
     const px = st.proxy || {};
     const up = st.upstream || {};
+    const ac = st.access || {};
     const perSec = up.min_interval_seconds > 0 ? (1 / up.min_interval_seconds).toFixed(0) : '∞';
+
+    // 代理框和访问地址是两码事，容易被混为一谈，所以这里分开写清楚
+    const lanUrls = ac.lan_urls || [];
+    const lanBlock = ac.open_to_lan
+      ? `<div class="kv" style="margin-top:8px">局域网访问（在别的机器浏览器里打开）：</div>
+         ${lanUrls.length
+           ? `<div class="kv">${lanUrls.map((u, i) => `<code>${esc(u)}</code>${
+               i === 0 ? ' <span style="color:var(--muted)">← 最可能是这个</span>' : ''
+             }`).join('<br>')}</div>
+              <div class="kv" style="margin-top:6px;color:var(--muted)">
+                装了虚拟机 / VPN / Clash TUN 的机器会有多个网卡，连不上就换一个试。
+                实在不确定，去路由器后台看这台机器的 IP。
+              </div>`
+           : `<div class="kv" style="color:var(--muted)">（没探测到可用的局域网 IP）</div>`}
+         <div class="notice warn" style="margin:10px 0 0">
+           这个服务<b>没有任何登录验证</b>。能连上这个地址的人都能看你的收藏夹、观看历史，
+           还能下载漫画。只在家里内网用，<b>千万别映射到公网</b>。
+         </div>`
+      : `<div class="kv">当前只监听 <code>127.0.0.1</code>，也就是<b>只有本机</b>能访问。</div>
+         <div class="kv" style="margin-top:6px">
+           想让别的机器（手机、笔记本）也能用：把 <code>.env</code> 里的
+           <code>JMREADER_HOST</code> 改成 <code>0.0.0.0</code>，然后重启本程序。
+         </div>
+         <div class="kv" style="margin-top:6px;color:var(--muted)">
+           注意 <code>0.0.0.0</code> 是"监听所有网卡"的意思，只能填在
+           <code>JMREADER_HOST</code> 里，<b>不能</b>填到上面的代理框。
+         </div>`;
 
     setMain(`
       <h1 class="page-title">设置</h1>
@@ -795,6 +823,20 @@
           常见值：Clash <code>http://127.0.0.1:7890</code> ／ v2rayN <code>http://127.0.0.1:10809</code>。
           「不使用代理」一般只用来排查问题。
         </div>
+        <div class="notice warn" style="margin:10px 0 0">
+          这里填的是<b>本程序连出去时走哪个代理</b>，不是给别人访问用的地址。
+          JMReader 和 Clash 在同一台机器上就填 <code>127.0.0.1:7890</code>，
+          <b>不要填 <code>0.0.0.0</code></b> —— 那是"监听所有网卡"的意思，连不过去。
+          想让别的机器访问，看下面的「访问地址」。
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <h3>访问地址</h3>
+        <div class="kv">本机：<code>${esc(ac.local_url || '-')}</code>
+          <span style="color:var(--muted)">（监听 ${esc(ac.host || '-')}:${ac.port || '-'}）</span>
+        </div>
+        ${lanBlock}
       </div>
 
       <div class="card" style="margin-top:12px">
