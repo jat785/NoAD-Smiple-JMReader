@@ -3,7 +3,15 @@
 # 执行时报 "bad interpreter: /bin/bash^M" —— 这种错很难一眼看出来。
 * text=auto eol=lf
 
-# Windows 批处理必须是 CRLF，否则 cmd 可能解析异常
+# Windows 批处理必须是 CRLF。
+#
+# 但**不要依赖这条规则**：它只在 git 真正写出文件时才生效。
+# 用 robocopy / 资源管理器 / 解压包把文件搬到别的机器时，git 完全不知情，
+# 落到盘上的就是源文件的行尾。worker 上就踩过这个坑 ——
+# run.bat 以 LF 落到 NAS，cmd 解析错乱，双击一闪就退。
+#
+# 所以 run.bat 另外做了两件事：内容全 ASCII、出错必定 pause。
+# 两者合起来保证"行尾再怎么错也不会静默失败"。
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
