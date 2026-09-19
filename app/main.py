@@ -94,6 +94,9 @@ def health() -> dict:
             "db_path": str(config.DB_PATH),
             "download_dir": str(config.DOWNLOAD_DIR),
             "journal_mode": db.journal_mode(),
+            # 启动自检的结果。非空表示数据库曾经损坏过（索引与表不同步会
+            # 让列表静默少返回数据），这里能看到是否已自动修复。
+            "repair_notes": db.repair_notes(),
         },
     }
 

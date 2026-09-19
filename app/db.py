@@ -72,6 +72,9 @@ _lock = threading.RLock()
 # 实际生效的日志模式，供 /api/health 之类的诊断用
 _journal_mode: str = "?"
 
+# 启动自检处理过的问题（已自动修复 / 修不好的），同样给诊断用
+_repair_notes: list[str] = []
+
 _SELFTEST_KEY = "_journal_selftest"
 
 
@@ -135,8 +138,45 @@ def _pick_journal_mode(conn: sqlite3.Connection) -> str:
     return "DELETE"
 
 
+def _check_and_repair(conn: sqlite3.Connection) -> list[str]:
+    """启动自检 + 自愈，返回没能修好的问题（空列表表示健康）。
+
+    SQLite 的索引与表失去同步时，**查询不会报任何错，只是少返回数据**。
+    现场遇到的就是：``idx_dl_album_time`` 少 3 条，于是
+
+        SELECT * FROM downloaded_album ORDER BY downloaded_at DESC  ->  2 行
+        SELECT * FROM downloaded_album                              ->  5 行
+        SELECT COUNT(*) FROM downloaded_album                       ->  2
+
+    同一张表、同一条连接，走索引和不走索引结果不一样。用户看到的
+    「磁盘上 5 部、列表只有 2 部」正是这个 —— 数据一条没丢，是索引烂了。
+
+    没人会往"文件损坏"上想，所以这里启动时顺手查一次，坏了就 REINDEX。
+    ``quick_check`` 只做 B 树结构的快速校验，不逐页比对，开销很小。
+    """
+    try:
+        problems = [str(r[0]) for r in conn.execute("PRAGMA quick_check")]
+    except sqlite3.DatabaseError as exc:
+        return [f"quick_check 执行失败：{exc}"]
+
+    if not problems or problems == ["ok"]:
+        return []
+
+    try:
+        conn.execute("REINDEX")
+        conn.commit()
+        after = [str(r[0]) for r in conn.execute("PRAGMA quick_check")]
+    except sqlite3.DatabaseError as exc:
+        return problems + [f"REINDEX 失败：{exc}"]
+
+    if after == ["ok"]:
+        # 修好了：把原始问题记下来，/api/health 里能看到曾经坏过
+        return [f"已自动修复：{p}" for p in problems]
+    return problems
+
+
 def _connection() -> sqlite3.Connection:
-    global _conn, _journal_mode
+    global _conn, _journal_mode, _repair_notes
     with _lock:
         if _conn is None:
             config.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -146,6 +186,7 @@ def _connection() -> sqlite3.Connection:
             conn.commit()
             _journal_mode = _pick_journal_mode(conn)
             conn.execute("PRAGMA synchronous=NORMAL")
+            _repair_notes = _check_and_repair(conn)
             _conn = conn
         return _conn
 
@@ -154,6 +195,12 @@ def journal_mode() -> str:
     """当前生效的日志模式（WAL / DELETE / …）。"""
     _connection()
     return _journal_mode
+
+
+def repair_notes() -> list[str]:
+    """本次启动自检发现并处理过的问题，空列表表示一切正常。"""
+    _connection()
+    return list(_repair_notes)
 
 
 def init() -> None:
