@@ -767,9 +767,12 @@
       <div class="card" style="margin-top:12px">
         <h3>网络代理</h3>
         <div class="kv">
-          直连禁漫<b>不稳定</b>：本机实测连续 5 次只有 2 次能通，其余是证书校验失败或连接被重置；
-          挂上本地代理（Clash / v2ray 等）则每次都稳定。这里是给每台机器自己配的地方，
-          改完立即生效，不用去翻配置文件。
+          直连禁漫<b>不稳定</b>：实测连续 5 次只有 2 次能通，其余是证书校验失败或连接被重置。
+          挂上本地代理（Clash / v2ray 等）则稳定。
+        </div>
+        <div class="kv" style="margin-top:6px">
+          若这台机器是 NAS / 以服务方式运行，「跟随系统」常常探测不到代理
+          —— 那就用<b>手动指定</b>填死地址，最稳。
         </div>
         <div class="toolbar" style="margin-top:10px">
           <select id="px-mode">
@@ -785,7 +788,7 @@
         </div>
         <div class="kv" id="px-result"></div>
         <div class="kv" id="px-effective">
-          当前生效：<code>${esc(px.mode === 'off' ? '直连（不走代理）' : (px.proxy || '未指定，由 jmcomic 自动探测系统代理'))}</code>
+          当前生效：<code>${esc(px.mode === 'off' ? '直连（不走代理）' : (px.proxy || '直连（系统探测不到代理）'))}</code>
           <span style="color:var(--muted)">（来源：${esc(px.source || '-')}）</span>
         </div>
         <div class="kv" style="margin-top:6px">
@@ -873,7 +876,9 @@
       pxResult.textContent = '正在测试…（要真的连一次禁漫，稍等）';
       try {
         const r = await apiPost('/api/settings/proxy/test');
-        pxResult.textContent = `${r.ok ? '✅' : '❌'} ${r.detail}（耗时 ${r.ms} ms）`;
+        // 必须把「实际走的哪个代理」报出来，否则失败时用户无从下手
+        pxResult.innerHTML = `${r.ok ? '✅' : '❌'} ${esc(r.detail)}<br>
+          <span style="color:var(--muted)">耗时 ${r.ms} ms · 实际使用：<code>${esc(r.proxy_used || '未知')}</code></span>`;
       } catch (err) {
         pxResult.textContent = `❌ 测试失败：${err.message}`;
       }

@@ -24,10 +24,12 @@ import json
 import random
 import threading
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
+from common import ProxyBuilder
 from jmcomic import JmModuleConfig, JmOption, JmcomicText
 from jmcomic.jm_exception import MissingAlbumPhotoException
 
@@ -139,11 +141,23 @@ def _stored_proxy() -> dict:
     return {"mode": "auto", "url": ""}
 
 
+def _system_proxy() -> dict:
+    """当场探测系统代理。探测不到就返回 ``{}``（等于直连）。
+
+    刻意不用 ``JmModuleConfig.DEFAULT_PROXIES`` —— 那是模块 import 时算一次的类属性，
+    进程启动那一刻没探测到代理的话，它会永远停留在 ``{}``，之后无论用户怎么操作都不会刷新。
+    """
+    try:
+        return ProxyBuilder.system_proxy() or {}
+    except Exception:  # noqa: BLE001 —— 探测失败就当没有代理，不能因为这个让整个应用起不来
+        return {}
+
+
 def effective_proxy_setting() -> dict:
     """当前真正生效的代理设置。
 
     ``mode``: auto（跟随系统/配置）/ off（强制直连）/ custom（手动指定）
-    ``proxy``: 实际要用的地址，空字符串表示不设代理
+    ``proxy``: 实际要用的地址，空字符串表示直连
     ``source``: 这个值是谁定的，用来在设置页上解释清楚
     """
     stored = _stored_proxy()
@@ -157,11 +171,53 @@ def effective_proxy_setting() -> dict:
         if url:
             return {"mode": "custom", "url": stored["url"], "proxy": url, "source": "设置页"}
         # 选了手动却没填地址，退回自动
-        return {"mode": "auto", "url": "", "proxy": env_url, "source": ".env / 环境变量" if env_url else "系统自动探测"}
+        return {"mode": "auto", "url": "", "proxy": env_url or _detect_system_proxy(),
+                "source": ".env / 环境变量" if env_url else "系统代理"}
 
     if env_url:
         return {"mode": "auto", "url": "", "proxy": env_url, "source": ".env / 环境变量"}
-    return {"mode": "auto", "url": "", "proxy": "", "source": "系统自动探测"}
+
+    detected = _detect_system_proxy()
+    return {
+        "mode": "auto",
+        "url": "",
+        "proxy": detected,
+        "source": "系统代理" if detected else "系统无代理（直连）",
+    }
+
+
+def _detect_system_proxy() -> str:
+    """探测系统代理并归一化成带协议的地址；没有就返回空串。"""
+    detected = _system_proxy()
+    addr = detected.get("http") or detected.get("https") or ""
+    return _normalize_proxy(addr)
+
+
+def proxy_diagnostics() -> dict:
+    """排查代理问题用的诊断信息。
+
+    「设置页上显示什么」和「HTTP 层实际用了什么」经常不是一回事，
+    排查时必须要能看到后者。
+    """
+    try:
+        raw = urllib.request.getproxies()
+    except Exception:  # noqa: BLE001
+        raw = {}
+    try:
+        frozen = getattr(JmModuleConfig, "DEFAULT_PROXIES", None)
+    except Exception:  # noqa: BLE001
+        frozen = None
+
+    eff = effective_proxy_setting()
+    injected = client_proxies()
+
+    return {
+        "setting": eff,
+        "injected": injected,
+        "raw_env_proxies": raw,
+        # 就是这个值冻在 import 时刻，害得 WinNAS 上怎么改都没反应
+        "jmcomic_default_at_import": frozen,
+    }
 
 
 def set_proxy_setting(mode: str, url: str = "") -> dict:
@@ -175,7 +231,13 @@ def set_proxy_setting(mode: str, url: str = "") -> dict:
 
 
 def test_connection() -> dict:
-    """按当前设置打一次最轻的请求，回报成没成、花了多久。"""
+    """按当前设置打一次最轻的请求，回报成没成、花了多久、**实际走的哪个代理**。
+
+    最后一项很关键：报错时如果不告诉用户它到底走没走代理，
+    用户只能对着"请求全部失败"干瞪眼。
+    """
+    eff = effective_proxy_setting()
+    used = eff["proxy"] or "直连（没有走代理）"
     started = time.time()
     try:
         _throttle()
@@ -185,12 +247,14 @@ def test_connection() -> dict:
             "ok": True,
             "ms": int((time.time() - started) * 1000),
             "detail": f"连接正常（/setting 返回 {keys} 项）",
+            "proxy_used": used,
         }
     except Exception as exc:  # noqa: BLE001 —— 就是要把失败原因原样报给用户
         return {
             "ok": False,
             "ms": int((time.time() - started) * 1000),
             "detail": f"{type(exc).__name__}: {str(exc)[:200]}",
+            "proxy_used": used,
         }
 
 
@@ -251,16 +315,21 @@ def _build_option() -> JmOption:
     postman = raw["client"]["postman"]
     meta = postman.setdefault("meta_data", {})
 
-    # 代理优先级：设置页的显式选择 > .env / 环境变量 > jmcomic 自动探测（读系统代理）
+    # ⚠ 代理**故意不在这里设置**。
     #
-    # jmcomic 的规则（见 common.ProxyBuilder）：
-    #   proxies 为 None  -> 自动探测系统代理（urllib.getproxies，Windows 上读注册表）
-    #   proxies 为 dict  -> 直接用，哪怕是空 dict（空 dict 就等于强制直连）
-    proxy = effective_proxy_setting()
-    if proxy["mode"] == "off":
-        meta["proxies"] = {}                     # 显式直连，连系统代理都不看
-    elif proxy["proxy"]:
-        meta["proxies"] = {"http": proxy["proxy"], "https": proxy["proxy"]}
+    # 看起来这里是最自然的地方，但 jmcomic 的 JmOption.construct 会走
+    # JmOption.merge_default_dict 做递归深合并，而它是这样写的：
+    #
+    #     for key, value in user_dict.items():
+    #         if isinstance(value, dict) and isinstance(default_dict.get(key), dict):
+    #             default_dict[key] = merge_default_dict(value, default_dict[key])
+    #
+    # 传 {} 进去时，循环体一次都不执行，于是**原样返回默认值**
+    # （默认值就是 JmModuleConfig.DEFAULT_PROXIES）。也就是说空字典在这个地方
+    # 根本无法表达"不使用代理"，会被系统代理悄悄顶掉。
+    #
+    # 所以代理改在 get_client() 里用 new_jm_client(proxies=...) 传 ——
+    # 那条路是直接 meta_data.update(kwargs)，不经过合并，{} 就是 {}。
 
     # 注入已保存的登录 Cookie（jmcomic 的 ensure_have_cookies 见到 cookie 就不再重取）
     session = _load_session()
@@ -269,6 +338,17 @@ def _build_option() -> JmOption:
         meta["cookies"] = cookies
 
     return JmOption.construct(raw)
+
+
+def client_proxies() -> dict:
+    """要交给 HTTP 层的 proxies。``{}`` 表示直连。
+
+    这是唯一可靠的"不使用代理"表达方式，原因见 _build_option 里的注释。
+    """
+    eff = effective_proxy_setting()
+    if eff["mode"] == "off" or not eff["proxy"]:
+        return {}
+    return {"http": eff["proxy"], "https": eff["proxy"]}
 
 
 def _get_option() -> JmOption:
@@ -285,7 +365,8 @@ def get_client():
     client = getattr(_tls, "client", None)
     if client is not None and getattr(_tls, "generation", None) == gen:
         return client
-    client = _get_option().new_jm_client()
+    # 代理在这里显式下发，绕开 JmOption 那个会把空 dict 吃掉的有损合并
+    client = _get_option().new_jm_client(proxies=client_proxies())
     _tls.client = client
     _tls.generation = gen
     return client

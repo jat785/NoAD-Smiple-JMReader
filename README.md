@@ -194,6 +194,37 @@ JMReader/
 常见端口：Clash `7890`、v2rayN `10809`、Fiddler `8888`。
 另外 jmcomic 还认识 `clash` / `v2ray` / `fiddler` / `system` 这几个简写。
 
+**为什么"跟随系统"在 NAS 上曾经失效（踩坑记录）**
+
+jmcomic 有两个坑叠在一起，值得写下来免得后人重踩：
+
+1. `JmModuleConfig.DEFAULT_PROXIES = ProxyBuilder.system_proxy()` 是**类属性**，
+   在模块 import 那一刻就算死了。如果进程启动的瞬间探测不到代理
+   （NAS 上很常见：以服务方式运行、Clash 还没起来、注册表读不到），
+   它就**永远是 `{}`**，之后用户再怎么开代理都没用，除非重启进程。
+
+2. 更隐蔽的是 `JmOption.merge_default_dict` 做的是**递归深合并**：
+
+   ```python
+   for key, value in user_dict.items():
+       if isinstance(value, dict) and isinstance(default_dict.get(key), dict):
+           default_dict[key] = merge_default_dict(value, default_dict[key])
+   ```
+
+   传 `proxies={}` 进去时，循环体一次都不执行，于是**原样返回默认值**。
+   也就是说：**空字典在 option 配置里根本无法表达"不使用代理"**，
+   它会被系统代理悄悄顶掉。
+
+   这个坑极难发现 —— 我们本机测试时"直连"模式显示的确实是 `{}`，
+   但那只是因为当时系统代理恰好关着、默认值本来就是 `{}`，**纯属巧合掩盖了 bug**。
+
+所以本项目**不走 option 配置传代理**，而是在 `new_jm_client(proxies=...)` 时下发
+（那条路是 `meta_data.update(kwargs)`，不经过合并）。这样三种模式都准确，
+且每次构建 option 都重新探测系统代理，不再吃 import 时刻的冻结值。
+
+`GET /api/settings` 里的 `diagnostics` 会直接给出 `injected`（实际到达 HTTP 层的值）
+和 `jmcomic_default_at_import`（那个冻结值），方便对比排查。
+
 **对站点的负担（这是本项目的首要约束）**
 
 这个项目刻意把自己压得比正常浏览网页还轻。核心是一道**全进程限速闸门**：

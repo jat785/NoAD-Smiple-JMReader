@@ -21,6 +21,7 @@ class ProxyPayload(BaseModel):
 def read_settings() -> dict:
     return {
         "proxy": jmclient.effective_proxy_setting(),
+        "diagnostics": jmclient.proxy_diagnostics(),
         "upstream": jmclient.stats(),
     }
 
