@@ -38,6 +38,47 @@
     return sameDay ? hm : `${d.getMonth() + 1}-${p(d.getDate())} ${hm}`;
   }
 
+  // 已登录时的「记住密码」区块。
+  //
+  // 关键点：**登录这个动作本身不会把密码留下来**，所以已登录状态下想开启
+  // 「记住密码」，就必须再要一次密码。之前这里只放了一个复选框，点了以后
+  // 后端只是把开关位置 1 —— 没有任何密码被保存，自动重登永远不会发生，
+  // 而界面还显示勾上了。那是在骗人。
+  //
+  // 现在按真实状态分两种：存过密码 -> 复选框可自由开关；
+  // 没存过 -> 复选框禁用，改为让用户填一次密码来保存。
+  function rememberBox(acc) {
+    const b = acc.secret_backend || null;
+    const header = `<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">`;
+
+    if (acc.has_credentials) {
+      return `${header}
+        <label class="kv" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="remember"${acc.auto_relogin ? ' checked' : ''}
+                 style="width:auto;margin:0">
+          记住密码，登录失效后自动重新登录
+        </label>
+        <div class="kv" id="remember-result" style="margin-top:6px"></div>
+        ${rememberNote(acc)}
+      </div>`;
+    }
+
+    return `${header}
+      <div class="kv" style="color:var(--muted)">
+        当前<b>没有保存密码</b>，所以登录失效后无法自动重新登录。
+        想开启的话，请在下面填一次密码 —— 它会被加密保存，用来在失效后自动重登。
+      </div>
+      <div class="toolbar" style="margin-top:8px">
+        <input id="remember-pass" type="password" placeholder="再输一次密码"
+               autocomplete="current-password"
+               style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)">
+        <button class="btn primary" id="remember-save">保存密码</button>
+      </div>
+      <div class="kv" id="remember-result" style="margin-top:6px"></div>
+      ${rememberNote(acc)}
+    </div>`;
+  }
+
   // 「记住密码」的说明。后端会把真实强度报上来 ——
   // Windows 上是 DPAPI（真的加密），其它系统只是本地密钥文件的 AES（混淆级）。
   //
@@ -964,21 +1005,12 @@
                <button class="btn primary" id="login">登录</button>
              </div>
              <label class="kv" style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer">
-               <input type="checkbox" id="remember-inline"${acc.auto_relogin ? ' checked' : ''}
+               <input type="checkbox" id="remember-inline"${acc.remember_wanted ? ' checked' : ''}
                       style="width:auto;margin:0">
                记住密码，登录失效后自动重新登录
              </label>
              ${rememberNote(acc)}`}
-        ${acc.logged_in ? `
-          <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
-            <label class="kv" style="display:flex;align-items:center;gap:6px;cursor:pointer">
-              <input type="checkbox" id="remember"${acc.auto_relogin ? ' checked' : ''}
-                     style="width:auto;margin:0">
-              记住密码，登录失效后自动重新登录
-            </label>
-            <div class="kv" id="remember-result" style="margin-top:6px"></div>
-            ${rememberNote(acc)}
-          </div>` : ''}
+        ${acc.logged_in ? rememberBox(acc) : ''}
       </div>
 
       <div class="card" style="margin-top:12px">
@@ -1082,12 +1114,40 @@
         const out = document.getElementById('remember-result');
         try {
           const r = await apiPost('/api/remember', { enabled: rememberBox.checked });
-          out.innerHTML = r.enabled
-            ? '<span style="color:var(--accent)">已开启。会话过期后会尝试自动重新登录。</span>'
-            : '<span style="color:var(--muted)">已关闭，存下来的密码已经清除。</span>';
+          if (r.active) {
+            out.innerHTML = r.enabled
+              ? '<span style="color:var(--accent)">已开启。会话过期后会尝试自动重新登录。</span>'
+              : '<span style="color:var(--muted)">已关闭，存下来的密码已经清除。</span>';
+          } else {
+            // 请求成功但没真正生效 —— 必须说出来，不能默认当成成功
+            out.innerHTML = `<span style="color:var(--warn,#c60)">${esc(r.reason || '没有生效')}</span>`;
+          }
+          viewSettings();
         } catch (err) {
           out.textContent = `保存失败：${err.message}${versionHint(err)}`;
           rememberBox.checked = !rememberBox.checked;
+        }
+      };
+    }
+
+    // 已登录但没存过密码：填一次密码来保存
+    const savePassBtn = document.getElementById('remember-save');
+    if (savePassBtn) {
+      savePassBtn.onclick = async () => {
+        const out = document.getElementById('remember-result');
+        const passEl = document.getElementById('remember-pass');
+        const password = passEl.value;
+        if (!password) { out.textContent = '请先输入密码'; return; }
+        savePassBtn.disabled = true;
+        out.textContent = '正在验证并保存…';
+        try {
+          await apiPost('/api/credentials', { username: acc.username, password });
+          out.innerHTML = '<span style="color:var(--accent)">已保存。会话过期后会尝试自动重新登录。</span>';
+          passEl.value = '';
+          viewSettings();
+        } catch (err) {
+          out.textContent = `保存失败：${err.message}${versionHint(err)}`;
+          savePassBtn.disabled = false;
         }
       };
     }

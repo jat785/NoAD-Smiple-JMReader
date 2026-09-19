@@ -433,19 +433,35 @@ def _invalidate() -> None:
 # ------------------------------------------------------------------ 账号
 
 def remember_enabled() -> bool:
-    return db.kv_get(_REMEMBER_KEY) == "1"
+    """「记住密码」是否**真正生效**。
+
+    这里刻意要求"开关打开 **且** 确实存着可用的密码"，而不是只看那个开关位。
+
+    原因是一个真实的设计错误：最初 /api/remember 只写了一个布尔标志。
+    于是用户勾上、刷新，看到的是勾选状态还在（或不在），但**根本没有密码** ——
+    自动重登永远不会发生。开关位和实际能力分离，是纯粹的谎报。
+    现在只要没有凭据，一律算作没开启。
+    """
+    return db.kv_get(_REMEMBER_KEY) == "1" and has_saved_credentials()
 
 
 def set_remember(enabled: bool) -> bool:
     """开关「记住密码」。
 
     关掉时**一并删掉已存的密码**，而不是留着不管 —— 用户点关闭就该真的清掉。
+
+    打开时**只写标志**：密码必须由登录接口（或 save_credentials）提供，
+    这里拿不到。打开后若仍无凭据，``remember_enabled()`` 会返回 False，
+    上层据此提示"需要重新登录一次才能保存密码"，而不是假装已经记住。
+
+    返回的是**实际生效的状态**，不是请求的意图。
     """
     db.kv_set(_REMEMBER_KEY, "1" if enabled else "0")
     if not enabled:
         db.kv_delete(_CRED_KEY)
         secretbox.wipe_key_file()
-    return enabled
+        return False
+    return has_saved_credentials()
 
 
 def _load_credentials() -> dict:
@@ -476,9 +492,50 @@ def has_saved_credentials() -> bool:
     return bool(creds.get("username") and creds.get("password"))
 
 
+def save_credentials(username: str, password: str) -> bool:
+    """把一个已知的账号密码存下来（供已登录用户手动开启「记住密码」）。
+
+    调用方必须先验证过这对凭据确实能登录 —— 本函数不做验证，
+    存一对错密码只会让后续自动重登白白失败并触发退避。
+    """
+    ok = _save_credentials(username, password)
+    if ok:
+        db.kv_set(_REMEMBER_KEY, "1")
+        with _login_lock:
+            _relogin_state["failures"] = 0
+            _relogin_state["last_error"] = ""
+        db.kv_delete(_FAIL_KEY)
+    return ok
+
+
 def secret_backend_info() -> dict:
     """当前平台用哪套机制保护密码，以及它的真实强度。"""
     return secretbox.backend_info()
+
+
+def toggle_remember(enabled: bool) -> dict:
+    """开关「记住密码」，并把"能否真正生效"如实回报。
+
+    三种结果必须区分开，否则界面只能撒谎：
+
+    - ``enabled=True``  且已有凭据  -> 真的生效了
+    - ``enabled=True``  但没有凭据  -> **没生效**，需要重新登录一次才能存下密码
+    - ``enabled=False``             -> 已关闭，凭据已清除
+    """
+    db.kv_set(_REMEMBER_KEY, "1" if enabled else "0")
+    if not enabled:
+        db.kv_delete(_CRED_KEY)
+        secretbox.wipe_key_file()
+        return {"enabled": False, "active": False, "has_credentials": False,
+                "reason": "已关闭，保存的密码已清除"}
+
+    active = has_saved_credentials()
+    return {
+        "enabled": True,
+        "active": active,
+        "has_credentials": active,
+        "reason": None if active else "还没有保存过密码：请在设置页填一次密码保存，或退出后重新登录一次",
+    }
 
 
 def session_state() -> dict:
@@ -489,6 +546,7 @@ def session_state() -> dict:
     """
     session = _load_session()
     logged_in = bool(session.get("username") and session.get("cookies"))
+    has_creds = has_saved_credentials()
     return {
         "logged_in": logged_in,
         "username": session.get("username") or None,
@@ -496,7 +554,11 @@ def session_state() -> dict:
         "expired": bool(_relogin_state["invalid_since"]) and logged_in,
         "invalid_since": int(_relogin_state["invalid_since"]) or None,
         "last_error": _relogin_state["last_error"] or None,
-        "auto_relogin": remember_enabled() and has_saved_credentials(),
+        # 「记住密码」的实际能力，不是一个开关位。
+        # auto_relogin 为真 == 开关开着 **且** 确实存着密码。
+        "remember_wanted": db.kv_get(_REMEMBER_KEY) == "1",
+        "has_credentials": has_creds,
+        "auto_relogin": remember_enabled(),
         "relogin_blocked": _relogin_state["failures"] >= _RELOGIN_MAX_ATTEMPTS,
         "secret_backend": secretbox.backend_info(),
     }
