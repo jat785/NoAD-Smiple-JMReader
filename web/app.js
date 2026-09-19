@@ -749,6 +749,15 @@
     const ac = st.access || {};
     const perSec = up.min_interval_seconds > 0 ? (1 / up.min_interval_seconds).toFixed(0) : '∞';
 
+    // 说清楚这个代理值会不会跟着 Windows 的系统代理开关变 —— 这是最容易踩的坑
+    const followsSystem = (px.source || '').includes('系统');
+    const depNote = px.mode === 'off'
+      ? '已强制直连，不走任何代理。'
+      : (followsSystem
+        ? `<b>注意：当前跟随 Windows 的系统代理。</b>系统代理一关，这里就变成直连了。
+           想让本程序<b>不受系统代理开关影响</b>，请用下面的「手动指定」把地址填死。`
+        : '这个值由配置文件 / 本页写死，<b>和 Windows 的系统代理开关无关</b> —— 关掉系统代理也照样走。');
+
     // 代理框和访问地址是两码事，容易被混为一谈，所以这里分开写清楚
     const lanUrls = ac.lan_urls || [];
     const lanBlock = ac.open_to_lan
@@ -823,6 +832,10 @@
           当前生效：<code>${esc(px.mode === 'off' ? '直连（不走代理）' : (px.proxy || '直连（系统探测不到代理）'))}</code>
           <span style="color:var(--muted)">（来源：${esc(px.source || '-')}）</span>
         </div>
+        <div class="notice ${followsSystem ? 'warn' : ''}" id="px-dept"
+             style="margin:8px 0 0;${followsSystem ? '' : 'background:transparent;border:1px solid var(--line);'}">
+          ${depNote}
+        </div>
         <div class="kv" style="margin-top:6px">
           常见值：Clash <code>http://127.0.0.1:7890</code> ／ v2rayN <code>http://127.0.0.1:10809</code>。
           「不使用代理」一般只用来排查问题。
@@ -890,6 +903,7 @@
     const urlInput = document.getElementById('px-url');
     const pxResult = document.getElementById('px-result');
     const pxEffective = document.getElementById('px-effective');
+    const pxDep = document.getElementById('px-dept');
 
     // 只有「手动指定」才需要填地址。用 readonly 而不是 disabled，这样值仍能读出来。
     const syncUrl = () => {
@@ -908,8 +922,18 @@
         const p = r.proxy;
         pxResult.textContent = '✅ 已保存。';
         pxEffective.innerHTML = `当前生效：<code>${
-          esc(p.mode === 'off' ? '直连（不走代理）' : (p.proxy || '未指定，由 jmcomic 自动探测系统代理'))
+          esc(p.mode === 'off' ? '直连（不走代理）' : (p.proxy || '直连（系统探测不到代理）'))
         }</code> <span style="color:var(--muted)">（来源：${esc(p.source || '-')}）</span>`;
+        // 提示条也要跟着更新，否则会显示上一个模式的说明
+        const fs = (p.source || '').includes('系统');
+        pxDep.className = `notice${fs ? ' warn' : ''}`;
+        pxDep.style.cssText = `margin:8px 0 0;${fs ? '' : 'background:transparent;border:1px solid var(--line);'}`;
+        pxDep.innerHTML = p.mode === 'off'
+          ? '已强制直连，不走任何代理。'
+          : (fs
+            ? `<b>注意：当前跟随 Windows 的系统代理。</b>系统代理一关，这里就变成直连了。
+               想让本程序<b>不受系统代理开关影响</b>，请用下面的「手动指定」把地址填死。`
+            : '这个值由配置文件 / 本页写死，<b>和 Windows 的系统代理开关无关</b> —— 关掉系统代理也照样走。');
         toast('代理设置已保存，下次请求即生效');
       } catch (err) {
         pxResult.textContent = `❌ 保存失败：${err.message}`;
@@ -922,9 +946,15 @@
       pxResult.textContent = '正在测试…（要真的连一次禁漫，稍等）';
       try {
         const r = await apiPost('/api/settings/proxy/test');
-        // 必须把「实际走的哪个代理」报出来，否则失败时用户无从下手
+        const usedProxy = (r.proxy_used || '').indexOf('http') === 0;
+        // 失败 + 没走代理 = 十有八九是"跟随系统"而系统代理关着，直接点破
+        const hint = (!r.ok && !usedProxy)
+          ? `<br><b>这次没有走代理。</b>如果上面是「跟随系统」，说明系统代理是关的 ——
+             要么去打开它，要么改用「手动指定」把 <code>http://127.0.0.1:7890</code> 填死
+             （后者不受系统代理开关影响）。`
+          : '';
         pxResult.innerHTML = `${r.ok ? '✅' : '❌'} ${esc(r.detail)}<br>
-          <span style="color:var(--muted)">耗时 ${r.ms} ms · 实际使用：<code>${esc(r.proxy_used || '未知')}</code></span>`;
+          <span style="color:var(--muted)">耗时 ${r.ms} ms · 实际使用：<code>${esc(r.proxy_used || '未知')}</code></span>${hint}`;
       } catch (err) {
         pxResult.textContent = `❌ 测试失败：${err.message}`;
       }
