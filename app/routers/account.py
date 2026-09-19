@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from .. import build_state
 from ..services import jmclient
 
 router = APIRouter(prefix="/api", tags=["account"])
@@ -27,8 +28,13 @@ def account() -> dict:
 
     ``logged_in`` 只代表本地存着一份会话，**不代表服务端还认它**；
     服务端口径见 ``expired``（某次真实请求拿到 401 之后才会置上）。
+
+    同时带上代码指纹与"是否需要重启"。前端据此判断自己是不是在跟一个
+    没有重启的旧后端说话 —— 那种情况下新字段会莫名其妙地缺失。
     """
-    return jmclient.session_state()
+    data = jmclient.session_state()
+    data["build"] = build_state()
+    return data
 
 
 @router.post("/login", summary="登录")

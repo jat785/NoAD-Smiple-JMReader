@@ -39,23 +39,51 @@
   }
 
   // 「记住密码」的说明。后端会把真实强度报上来 ——
-  // Windows 上是 DPAPI（真的加密），其它系统只是本地密钥文件的 AES（混淆级），
-  // 这两种情况必须说清楚，不能让用户以为到哪都一样安全。
+  // Windows 上是 DPAPI（真的加密），其它系统只是本地密钥文件的 AES（混淆级）。
+  //
+  // 注意这里有**三种**情况，不能混成两种：
+  //   1. 后端说它是安全的          -> 正常说明
+  //   2. 后端说它**不**安全        -> 警告
+  //   3. 压根没拿到后端信息        -> 说"没拿到"，而不是替后端断言"它不安全"
+  //
+  // 第 3 种之前被错并到第 2 种，于是旧后端（不返回这个字段）会显示
+  // 「当前机制：未知。它不保证安全。」—— 把"信息缺失"说成了"后端判定不安全"。
   function rememberNote(acc) {
-    const b = acc.secret_backend || {};
+    const b = (acc && acc.secret_backend) || null;
     const base = '禁漫的登录状态只有几小时有效期，过期后需要重新登录。'
       + '勾选后本程序会用下面的机制把密码存起来，失效时自动重登。';
+
+    if (!b) {
+      return `<div class="notice warn" style="margin:8px 0 0">
+        ${base}<br><br>
+        <b>没拿到本机凭据保护机制的信息。</b>这通常意味着后端还是旧版本、
+        或服务没有重启（改了代码不重启是不会生效的）。
+        <br><br>在弄清楚它到底用哪种机制之前，<b>先不要勾选</b>。
+        可以点下面的「测试连接」确认服务是活的，或直接重启一次本程序。
+      </div>`;
+    }
+
     if (b.secure) {
       return `<div class="kv" style="color:var(--muted);margin-top:6px">
         ${base}<br>
         当前机制：<b>${esc(b.label || '')}</b>。${esc(b.note || '')}
       </div>`;
     }
+
     return `<div class="notice warn" style="margin:8px 0 0">
       ${base}<br><br>
       当前机制：<b>${esc(b.label || '未知')}</b>。<b>它不保证安全。</b>${esc(b.note || '')}
       <br><br>想要真正安全，请在 Windows 上运行本程序，或不要勾选这一项。
     </div>`;
+  }
+
+  // 版本不匹配时给一句明确的话。旧后端不认识新接口，会回 405/404，
+  // 那种"保存失败：Method Not Allowed"对用户毫无意义。
+  function versionHint(err) {
+    if (err && (err.status === 405 || err.status === 404)) {
+      return '（接口不存在：后端多半是旧版本或没重启，请重启一次本程序）';
+    }
+    return '';
   }
 
   // 会话失效的判断不能靠字符串猜。后端现在把 401 明确成 HTTP 401，
@@ -849,6 +877,23 @@
     const ac = st.access || {};
     const perSec = up.min_interval_seconds > 0 ? (1 / up.min_interval_seconds).toFixed(0) : '∞';
 
+    // 后端"没有重启"是个很隐蔽的坑：磁盘上已经是新代码，进程里还是旧的，
+    // 于是表现为新接口 405、新字段拿不到。这里直接把它摆到页面最上面。
+    const beMissing = !acc.secret_backend;
+    const beStale = !!(acc.build && acc.build.stale);
+    const staleBanner = (beMissing || beStale)
+      ? `<div class="notice warn" style="margin-bottom:12px">
+           <b>后端没有跑最新代码。</b>
+           ${beStale
+             ? `磁盘上的代码指纹是 <code>${esc((acc.build || {}).on_disk || '')}</code>，
+                而正在运行的进程还是启动时加载的 <code>${esc((acc.build || {}).running || '')}</code>。`
+             : '这个后端不认识新版接口（<code>/api/remember</code> 返回 405）。'}
+           <br><br>
+           <b>改代码不会影响已经启动的进程</b> —— 需要把本程序<b>彻底关掉再重新启动</b>。
+           重启前，「记住密码」会一直显示成未知状态。
+         </div>`
+      : '';
+
     // 说清楚这个代理值会不会跟着 Windows 的系统代理开关变 —— 这是最容易踩的坑
     const followsSystem = (px.source || '').includes('系统');
     const depNote = px.mode === 'off'
@@ -891,6 +936,7 @@
 
     setMain(`
       <h1 class="page-title">设置</h1>
+      ${staleBanner}
 
       <div class="card">
         <h3>禁漫账号</h3>
@@ -1040,7 +1086,7 @@
             ? '<span style="color:var(--accent)">已开启。会话过期后会尝试自动重新登录。</span>'
             : '<span style="color:var(--muted)">已关闭，存下来的密码已经清除。</span>';
         } catch (err) {
-          out.textContent = `保存失败：${err.message}`;
+          out.textContent = `保存失败：${err.message}${versionHint(err)}`;
           rememberBox.checked = !rememberBox.checked;
         }
       };

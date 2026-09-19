@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from jmcomic.jm_exception import JmcomicException
 
-from . import __version__, config, db
+from . import __version__, build_state, config, db
 from .routers import account, browse, history, library, settings
 
 logging.basicConfig(
@@ -46,7 +46,7 @@ app.include_router(settings.router)
 
 @app.middleware("http")
 async def _api_response_headers(request: Request, call_next):
-    """统一处理 API 响应头。
+    """统一处理响应头。
 
     1. 给文本类响应补 ``charset=utf-8``。
 
@@ -55,11 +55,20 @@ async def _api_response_headers(request: Request, call_next):
     退化成 Latin-1，把「劇情向」解成 9 个乱码字符，进而导致标签搜索搜不到东西。
     ``application/javascript`` 同理 —— 浏览器没事，脚本/命令行工具会中招。
 
-    2. API 一律禁用缓存。
+    2. ``/api/*`` 一律禁用缓存。
 
     这些都是实时数据。万一被浏览器或中间代理复用旧响应，就会变成
     「明明扫描到 4 部，列表却只有 1 部」这种极难排查的幽灵问题 ——
     现象看着像后端 bug，实际数据早就写进去了。
+
+    3. 静态前端（html / js / css）必须**每次回源校验**。
+
+    这里踩过坑：改完前端后浏览器一直跑旧的 ``app.js``，于是新加的界面
+    怎么刷新都不出现。当时误判成缓存、又误判成后端问题，绕了远路。
+
+    用 ``no-cache`` 而不是 ``no-store``：前者表示"可以存，但每次必须回源
+    校验"，配合 ETag 命中时返回 304，只传几十字节；``no-store`` 会让浏览器
+    每次重下整个文件（app.js 现在有 60KB+）。
     """
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
@@ -72,7 +81,19 @@ async def _api_response_headers(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
+    elif _is_frontend_asset(request.url.path, content_type):
+        # 前端静态资源：允许缓存，但每次都要回源校验（ETag / Last-Modified）
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
+
+
+def _is_frontend_asset(path: str, content_type: str) -> bool:
+    """静态前端资源（不是 /api，也不是图片等二进制缓存）。"""
+    lowered = content_type.lower()
+    if lowered.startswith("image/") or lowered.startswith("font/"):
+        return False          # 封面、章节图这些走各自的缓存策略
+    return path.endswith((".html", ".js", ".css")) or path in ("", "/")
+
 
 
 @app.get("/api/health", tags=["meta"], summary="健康检查")
@@ -83,6 +104,11 @@ def health() -> dict:
     return {
         "ok": True,
         "version": __version__,
+        # 启动时加载的代码指纹 vs 现在磁盘上的指纹。
+        # 不一致 = 磁盘上已经是新代码，但进程还跑着旧的（改完没重启）。
+        # 这会表现为"新接口 405、新字段拿不到、界面文案不对"，很难往这上面想，
+        # 所以直接报出来，别让人去猜缓存。
+        "build": build_state(),
         "logged_in": jmclient.is_logged_in(),
         "username": jmclient.current_user(),
         # 对禁漫的实际请求量。看这个数就知道自己给站点添了多少负担。
