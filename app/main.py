@@ -77,6 +77,7 @@ async def _api_response_headers(request: Request, call_next):
 
 @app.get("/api/health", tags=["meta"], summary="健康检查")
 def health() -> dict:
+    from . import db
     from .services import jmclient
 
     return {
@@ -86,6 +87,14 @@ def health() -> dict:
         "username": jmclient.current_user(),
         # 对禁漫的实际请求量。看这个数就知道自己给站点添了多少负担。
         "upstream": jmclient.stats(),
+        # 数据落在哪里、日志模式是什么。排查「写进去了却看不到」时要看这两个。
+        # journal_mode 正常是 WAL；如果显示 DELETE，说明这块盘撑不住 WAL 的
+        # 共享内存，已经自动退回了更保守但可靠的模式。
+        "storage": {
+            "db_path": str(config.DB_PATH),
+            "download_dir": str(config.DOWNLOAD_DIR),
+            "journal_mode": db.journal_mode(),
+        },
     }
 
 

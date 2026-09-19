@@ -661,7 +661,10 @@
           ${ok ? '' : '<br><b>磁盘数和索引数对不上，问题就出在这一步。</b>'}
           <br><span style="color:var(--muted)">
             下载目录：<code>${esc(diag.download_dir)}</code><br>
-            索引文件：<code>${esc(diag.db_path)}</code>
+            索引文件：<code>${esc(diag.db_path)}</code><br>
+            日志模式：<code>${esc(diag.journal_mode || '?')}</code>
+            ${(diag.journal_mode && diag.journal_mode !== 'WAL')
+              ? '（这块盘撑不住 WAL 的共享内存，已自动退回更保守但可靠的模式）' : ''}
           </span>
           ${(diag.duplicate_album_ids || []).length ? `
             <div style="margin-top:8px">

@@ -482,6 +482,7 @@ def rescan_library() -> dict:
         "total_after": len(after),
         "download_dir": str(root),
         "db_path": str(config.DB_PATH),
+        "journal_mode": db.journal_mode(),
         "albums": [
             {"album_id": a["album_id"], "title": (a.get("title") or "")[:40],
              "chapters": a.get("chapter_count")}

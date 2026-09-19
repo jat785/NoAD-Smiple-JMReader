@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -68,19 +69,91 @@ CREATE TABLE IF NOT EXISTS kv (
 _conn: Optional[sqlite3.Connection] = None
 _lock = threading.RLock()
 
+# 实际生效的日志模式，供 /api/health 之类的诊断用
+_journal_mode: str = "?"
+
+_SELFTEST_KEY = "_journal_selftest"
+
+
+def _write_read_ok(conn: sqlite3.Connection) -> bool:
+    """写一行立刻读回来。读不到就说明这块盘的共享内存/文件锁不靠谱。"""
+    token = os.urandom(8).hex()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)", (_SELFTEST_KEY, token)
+        )
+        conn.commit()
+        row = conn.execute("SELECT v FROM kv WHERE k = ?", (_SELFTEST_KEY,)).fetchone()
+        ok = row is not None and row[0] == token
+        conn.execute("DELETE FROM kv WHERE k = ?", (_SELFTEST_KEY,))
+        conn.commit()
+        return ok
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _pick_journal_mode(conn: sqlite3.Connection) -> str:
+    """挑一个在这块盘上**真的能用**的日志模式。
+
+    默认想用 WAL，但它依赖 ``-shm`` 上的共享内存与可靠的文件锁。放在网络盘、
+    NAS 共享目录、部分容器卷上时这两样会失效，而且是**静默**失效：
+
+        写入确实追加进了 WAL，但读连接一直停在旧快照上。
+
+    表现出来就是「扫描说写了 5 部，列表永远只显示 2 部」，而且
+    ``downloaded_album`` 与 ``downloaded_chapter`` 的行数会对不上 ——
+    看着像查询 bug，其实是提交丢了，极难排查。
+
+    所以这里不能想当然地开 WAL：写完读回来验一次，读不到就退回不需要
+    共享内存的 rollback journal。数据目录在本地盘时 WAL 依然会被选中。
+    """
+    forced = os.environ.get("JMREADER_SQLITE_JOURNAL", "").strip().lower()
+    if forced in ("delete", "truncate", "persist", "memory"):
+        conn.execute(f"PRAGMA journal_mode={forced.upper()}")
+        return forced.upper()
+
+    if forced == "wal":
+        conn.execute("PRAGMA journal_mode=WAL")
+        return "WAL"
+
+    try:
+        got = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        if not got or str(got[0]).lower() != "wal":
+            # 盘本身就不支持 WAL，SQLite 会保持原来的模式
+            return str(got[0]).upper() if got else "DELETE"
+    except sqlite3.DatabaseError:
+        return "DELETE"
+
+    if _write_read_ok(conn):
+        return "WAL"
+
+    # 共享内存没起作用：退回 rollback journal（不依赖 -shm）
+    try:
+        conn.execute("PRAGMA journal_mode=DELETE")
+    except sqlite3.DatabaseError:
+        pass
+    return "DELETE"
+
 
 def _connection() -> sqlite3.Connection:
-    global _conn
+    global _conn, _journal_mode
     with _lock:
         if _conn is None:
             config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-            _conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
-            _conn.row_factory = sqlite3.Row
-            _conn.execute("PRAGMA journal_mode=WAL")
-            _conn.execute("PRAGMA synchronous=NORMAL")
-            _conn.executescript(_SCHEMA)
-            _conn.commit()
+            conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(_SCHEMA)
+            conn.commit()
+            _journal_mode = _pick_journal_mode(conn)
+            conn.execute("PRAGMA synchronous=NORMAL")
+            _conn = conn
         return _conn
+
+
+def journal_mode() -> str:
+    """当前生效的日志模式（WAL / DELETE / …）。"""
+    _connection()
+    return _journal_mode
 
 
 def init() -> None:
