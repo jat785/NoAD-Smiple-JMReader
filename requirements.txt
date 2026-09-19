@@ -1,4 +1,8 @@
-# 直接依赖。其余依赖（Pillow、curl-cffi、pycryptodome 等）由 jmcomic 自动带入。
+# 直接依赖。其余依赖（Pillow、curl-cffi 等）由 jmcomic 自动带入。
 jmcomic==2.7.7
 fastapi==0.141.1
 uvicorn[standard]==0.53.0
+
+# 非 Windows 上「记住密码」的兜底加密（Windows 走系统 DPAPI，不用它）。
+# 本来就由 jmcomic 带入，这里显式写出来，避免哪天上游去掉后兜底静默失效。
+pycryptodome

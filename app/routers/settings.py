@@ -96,6 +96,8 @@ def read_settings(request: Request) -> dict:
         "diagnostics": jmclient.proxy_diagnostics(),
         "access": _access_info(request),
         "upstream": jmclient.stats(),
+        # 「记住密码」用的密封后端。secure 不为真时，界面上必须说明它只是混淆级。
+        "secret_backend": jmclient.secret_backend_info(),
     }
 
 

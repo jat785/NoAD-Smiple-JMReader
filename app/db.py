@@ -175,6 +175,51 @@ def _check_and_repair(conn: sqlite3.Connection) -> list[str]:
     return problems
 
 
+def _scrub_legacy_plaintext(conn: sqlite3.Connection) -> list[str]:
+    """清掉旧版本留在空闲页里的明文凭据。
+
+    背景：早期版本把 ``{"username": ..., "cookies": {"AVS": ...}}`` 以**明文 JSON**
+    存进 kv 表。现在读写都走密封令牌，但 SQLite 的 UPDATE/INSERT 只写新行，
+    **旧行的字节仍留在数据页里**，直到那页被复用或库被重写为止。
+
+    实测在库文件和 -wal 里都能直接搜到完整的旧明文（含可用的 AVS 令牌）。
+    光把行改成密文是不够的，必须把底层字节也抹掉。
+
+    做法：
+    1. ``VACUUM`` —— 重建整个库文件，彻底丢弃空闲页
+    2. ``wal_checkpoint(TRUNCATE)`` —— 把 WAL 截断，清掉里面的旧副本
+
+    检测不只看当前行：**已经迁移过、但旧字节还留在页里的库也要清**，
+    所以直接按字节找明文特征（``"cookies"`` 只可能出现在旧格式里）。
+    只扫 kv 那几页的开销可以忽略，而且清理完就不再触发。
+    """
+    notes: list[str] = []
+    marker = b'"cookies"'
+    try:
+        db_bytes = config.DB_PATH.read_bytes()
+        wal_path = config.DB_PATH.with_name(config.DB_PATH.name + "-wal")
+        wal_bytes = wal_path.read_bytes() if wal_path.exists() else b""
+    except OSError:
+        return notes
+
+    if marker not in db_bytes and marker not in wal_bytes:
+        return notes
+
+    try:
+        conn.execute("VACUUM")
+        conn.commit()
+        notes.append("已清除旧版本残留的明文登录凭据（VACUUM 重建数据库）")
+    except sqlite3.DatabaseError as exc:
+        notes.append(f"明文凭据清理失败：{exc}")
+        return notes
+
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.DatabaseError:
+        pass
+    return notes
+
+
 def _connection() -> sqlite3.Connection:
     global _conn, _journal_mode, _repair_notes
     with _lock:
@@ -184,9 +229,16 @@ def _connection() -> sqlite3.Connection:
             conn.row_factory = sqlite3.Row
             conn.executescript(_SCHEMA)
             conn.commit()
+            # 覆盖删除：UPDATE/DELETE 留下的旧字节会在页内被清零，
+            # 否则每次轮换登录凭据都会在库里留下一份"已删除"的明文。
+            try:
+                conn.execute("PRAGMA secure_delete=ON")
+            except sqlite3.DatabaseError:
+                pass
             _journal_mode = _pick_journal_mode(conn)
             conn.execute("PRAGMA synchronous=NORMAL")
             _repair_notes = _check_and_repair(conn)
+            _repair_notes += _scrub_legacy_plaintext(conn)
             _conn = conn
         return _conn
 

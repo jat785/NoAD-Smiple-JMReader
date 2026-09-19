@@ -21,6 +21,7 @@ jmcomic 没有包装、由本模块补齐的接口
 from __future__ import annotations
 
 import json
+import logging
 import random
 import threading
 import time
@@ -34,6 +35,9 @@ from jmcomic import JmModuleConfig, JmOption, JmcomicText
 from jmcomic.jm_exception import MissingAlbumPhotoException
 
 from .. import config, db
+from . import secretbox
+
+logger = logging.getLogger("jmreader")
 
 # ------------------------------------------------------------------ 常量
 
@@ -53,7 +57,28 @@ MAIN_TAG_AUTHOR = 2
 MAIN_TAG_TAG = 3
 MAIN_TAG_ACTOR = 4
 
-_SESSION_KEY = "session"          # kv 里保存 {"username": ..., "cookies": {...}}
+_SESSION_KEY = "session"          # kv 里保存密封后的 {"username": ..., "cookies": {...}, "ts": ...}
+_CRED_KEY = "credentials"         # kv 里保存密封后的 {"username": ..., "password": ...}
+_REMEMBER_KEY = "remember_login"  # "1" / "0"
+_FAIL_KEY = "login_failures"      # 自动重登连续失败计数，用于退避
+
+# 自动重新登录的退避策略。
+#
+# 会话过期是服务端说了算（实测 1.8~3.7 小时之间失效），客户端只能重登。
+# 但**绝不能在失败时循环重试** —— 密码改过的情况下那看起来就是撞库，
+# 可能触发风控甚至锁号。所以：单次尝试 → 失败就退避 → 连续失败到上限
+# 就彻底停手，转为让用户手动登录。
+_RELOGIN_MAX_ATTEMPTS = 3         # 连续失败上限，超过就不再自动尝试
+_RELOGIN_BACKOFF = (30, 300, 1800)  # 第 1/2/3 次失败后，至少等这么多秒才再试
+
+_login_lock = threading.RLock()
+_relogin_state: dict[str, Any] = {
+    "last_attempt": 0.0,
+    "failures": 0,
+    "invalid_since": 0.0,
+    "last_error": "",
+    "last_ok": 0.0,
+}
 
 _CONTENT_TYPES = {
     ".webp": "image/webp",
@@ -287,18 +312,41 @@ def _cached(key: Any, ttl: float, producer):
 
 
 def _load_session() -> dict:
+    """读取本地保存的会话。
+
+    内容（含 username 与 Cookie）是**密封**存放的，库里看不到明文。
+    遇到旧的明文格式会自动就地升级；解不开（换机器、换用户）就当作没登录。
+    """
     raw = db.kv_get(_SESSION_KEY)
     if not raw:
         return {}
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except (TypeError, ValueError):
+
+    payload = secretbox.unseal(raw)
+    if payload is None:
+        # 兼容早期版本留下的明文 JSON，读到就顺手加密回去
+        try:
+            legacy = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        if isinstance(legacy, dict) and legacy:
+            _save_session(legacy)
+            return legacy
         return {}
+
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _save_session(session: dict) -> None:
-    db.kv_set(_SESSION_KEY, session)
+    token = secretbox.seal(json.dumps(session, ensure_ascii=False).encode("utf-8"))
+    if token is None:
+        # 密封不了就宁可不存 —— 绝不退回明文
+        logger.warning("无法安全保存登录状态（密封后端不可用），本次不落盘")
+        return
+    db.kv_set(_SESSION_KEY, token)
 
 
 def _build_option() -> JmOption:
@@ -384,6 +432,76 @@ def _invalidate() -> None:
 
 # ------------------------------------------------------------------ 账号
 
+def remember_enabled() -> bool:
+    return db.kv_get(_REMEMBER_KEY) == "1"
+
+
+def set_remember(enabled: bool) -> bool:
+    """开关「记住密码」。
+
+    关掉时**一并删掉已存的密码**，而不是留着不管 —— 用户点关闭就该真的清掉。
+    """
+    db.kv_set(_REMEMBER_KEY, "1" if enabled else "0")
+    if not enabled:
+        db.kv_delete(_CRED_KEY)
+        secretbox.wipe_key_file()
+    return enabled
+
+
+def _load_credentials() -> dict:
+    raw = db.kv_get(_CRED_KEY)
+    payload = secretbox.unseal(raw)
+    if payload is None:
+        return {}
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_credentials(username: str, password: str) -> bool:
+    token = secretbox.seal(
+        json.dumps({"username": username, "password": password}, ensure_ascii=False).encode("utf-8")
+    )
+    if token is None:
+        logger.warning("当前平台无法安全保存密码，「记住密码」未生效")
+        return False
+    db.kv_set(_CRED_KEY, token)
+    return True
+
+
+def has_saved_credentials() -> bool:
+    creds = _load_credentials()
+    return bool(creds.get("username") and creds.get("password"))
+
+
+def secret_backend_info() -> dict:
+    """当前平台用哪套机制保护密码，以及它的真实强度。"""
+    return secretbox.backend_info()
+
+
+def session_state() -> dict:
+    """给界面用的登录状态。
+
+    ``logged_in`` 只表示"本地存着一份看起来可用的会话"，**不代表服务端还认它**。
+    真正的失效信号来自 ``expired`` —— 那是某次真实请求拿到 401 之后才置上的。
+    """
+    session = _load_session()
+    logged_in = bool(session.get("username") and session.get("cookies"))
+    return {
+        "logged_in": logged_in,
+        "username": session.get("username") or None,
+        "login_at": session.get("ts") or None,
+        "expired": bool(_relogin_state["invalid_since"]) and logged_in,
+        "invalid_since": int(_relogin_state["invalid_since"]) or None,
+        "last_error": _relogin_state["last_error"] or None,
+        "auto_relogin": remember_enabled() and has_saved_credentials(),
+        "relogin_blocked": _relogin_state["failures"] >= _RELOGIN_MAX_ATTEMPTS,
+        "secret_backend": secretbox.backend_info(),
+    }
+
+
 def is_logged_in() -> bool:
     session = _load_session()
     return bool(session.get("username") and session.get("cookies"))
@@ -393,29 +511,132 @@ def current_user() -> Optional[str]:
     return _load_session().get("username") or None
 
 
-def login(username: str, password: str) -> dict:
-    """登录并把 Cookie 持久化，使后续所有请求都带上会话。"""
+def _do_login(username: str, password: str) -> dict:
+    """真正打一次登录接口。不碰本地存储。"""
     _throttle()
     client = get_client()
     client.login(username, password)
-
     cookies = client.get_meta_data("cookies") or {}
     if not isinstance(cookies, dict) or not cookies:
         raise RuntimeError("登录返回的 Cookie 为空，登录可能未成功")
-
     _save_session({"username": username, "cookies": cookies, "ts": int(time.time())})
     _invalidate()
     return {"username": username}
 
 
+def login(username: str, password: str) -> dict:
+    """用户主动登录。成功后按「记住密码」开关决定是否把凭据密封存下来。"""
+    result = _do_login(username, password)
+
+    with _login_lock:
+        _relogin_state["failures"] = 0
+        _relogin_state["invalid_since"] = 0.0
+        _relogin_state["last_error"] = ""
+        _relogin_state["last_ok"] = time.time()
+    db.kv_delete(_FAIL_KEY)
+
+    if remember_enabled():
+        _save_credentials(username, password)
+    return result
+
+
 def logout() -> None:
+    """退出登录：会话、凭据、失败计数一并清掉。"""
     db.kv_delete(_SESSION_KEY)
+    db.kv_delete(_CRED_KEY)
+    db.kv_delete(_REMEMBER_KEY)
+    db.kv_delete(_FAIL_KEY)
+    secretbox.wipe_key_file()
+    with _login_lock:
+        _relogin_state.update(
+            {"failures": 0, "invalid_since": 0.0, "last_error": "", "last_attempt": 0.0}
+        )
     _invalidate()
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """判断异常是不是"服务端说我没登录"。
+
+    jmcomic 把这类响应包成 ResponseUnexpectedException，消息里带着原始 JSON：
+        {"code":401, "errorMsg":"請先登入會員"}
+    这里同时认简繁两种写法，也认我们自己抛的 PermissionError。
+    """
+    if isinstance(exc, PermissionError):
+        return True
+    text = str(exc)
+    if '"code":401' in text.replace(" ", ""):
+        return True
+    return ("請先登入" in text) or ("请先登录" in text) or ("尚未登入" in text)
+
+
+def relogin_if_possible() -> bool:
+    """会话失效时，用存下来的凭据自动重新登录一次。
+
+    返回 True 表示"现在可以重试原请求了"。带退避与失败上限，
+    **失败绝不会连环重试**（那看起来像撞库，可能触发风控）。
+    """
+    if not remember_enabled():
+        return False
+
+    creds = _load_credentials()
+    username, password = creds.get("username"), creds.get("password")
+    if not username or not password:
+        return False
+
+    with _login_lock:
+        failures = _relogin_state["failures"]
+        if failures >= _RELOGIN_MAX_ATTEMPTS:
+            return False
+
+        now = time.time()
+        if failures and now - _relogin_state["last_attempt"] < _RELOGIN_BACKOFF[failures - 1]:
+            return False           # 还在退避窗口里
+
+        _relogin_state["last_attempt"] = now
+
+    try:
+        _do_login(str(username), str(password))
+    except Exception as exc:  # noqa: BLE001 —— 重登失败不能让原请求崩掉
+        with _login_lock:
+            _relogin_state["failures"] += 1
+            _relogin_state["invalid_since"] = _relogin_state["invalid_since"] or time.time()
+            _relogin_state["last_error"] = f"{type(exc).__name__}: {str(exc)[:180]}"
+            db.kv_set(_FAIL_KEY, str(_relogin_state["failures"]))
+        logger.warning("自动重新登录失败（第 %d 次），已转入退避", _relogin_state["failures"])
+        return False
+
+    with _login_lock:
+        _relogin_state["failures"] = 0
+        _relogin_state["invalid_since"] = 0.0
+        _relogin_state["last_error"] = ""
+        _relogin_state["last_ok"] = time.time()
+    db.kv_delete(_FAIL_KEY)
+    logger.info("已用保存的凭据自动重新登录")
+    return True
 
 
 def _require_login() -> None:
     if not is_logged_in():
         raise PermissionError("该功能需要先登录禁漫账号")
+
+
+def _authed(call):
+    """跑一个需要登录的调用；遇到会话失效就自动重登并重试一次。
+
+    放在这里而不是每个接口里各写一遍，是为了保证所有需要登录的路径
+    行为一致：失败 → 标记失效 → 尝试重登 → 重试一次 → 还不行就明确报错。
+    """
+    try:
+        return call()
+    except Exception as exc:  # noqa: BLE001
+        if not _is_auth_error(exc):
+            raise
+        with _login_lock:
+            _relogin_state["invalid_since"] = _relogin_state["invalid_since"] or time.time()
+        _invalidate()          # 丢掉可能带着旧 cookie 的 client
+        if not relogin_if_possible():
+            raise PermissionError("登录已失效，请重新登录禁漫账号") from exc
+    return call()
 
 
 # ------------------------------------------------------------------ 数据整形
@@ -1121,7 +1342,7 @@ def _prune_cover_cache() -> None:
 # ------------------------------------------------------------------ 收藏夹
 
 def favorites(page: int = 1, folder_id: str = "0", order: str = "mr") -> dict:
-    """收藏夹列表。需要登录。"""
+    """收藏夹列表。需要登录；会话过期时会尝试自动重登一次。"""
     _require_login()
     order = order if order in {"mr", "mp"} else "mr"
 
@@ -1131,7 +1352,11 @@ def favorites(page: int = 1, folder_id: str = "0", order: str = "mr") -> dict:
             page=page, order_by=order, folder_id=str(folder_id), username=current_user() or ""
         )
 
-    data = _cached(("favorites", page, folder_id, order), config.ALBUM_TTL, produce)
+    def fetch():
+        # 命中缓存就不会真的出网，也就不会遇到 401
+        return _cached(("favorites", page, folder_id, order), config.ALBUM_TTL, produce)
+
+    data = _authed(fetch)
 
     raw_items = getattr(data, "content", None) or []
     items = []

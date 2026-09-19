@@ -28,6 +28,44 @@
     toastTimer = setTimeout(() => { toastEl.hidden = true; }, 3200);
   }
 
+  function fmtTime(unixSec) {
+    if (!unixSec) return '';
+    const d = new Date(unixSec * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+    return sameDay ? hm : `${d.getMonth() + 1}-${p(d.getDate())} ${hm}`;
+  }
+
+  // 「记住密码」的说明。后端会把真实强度报上来 ——
+  // Windows 上是 DPAPI（真的加密），其它系统只是本地密钥文件的 AES（混淆级），
+  // 这两种情况必须说清楚，不能让用户以为到哪都一样安全。
+  function rememberNote(acc) {
+    const b = acc.secret_backend || {};
+    const base = '禁漫的登录状态只有几小时有效期，过期后需要重新登录。'
+      + '勾选后本程序会用下面的机制把密码存起来，失效时自动重登。';
+    if (b.secure) {
+      return `<div class="kv" style="color:var(--muted);margin-top:6px">
+        ${base}<br>
+        当前机制：<b>${esc(b.label || '')}</b>。${esc(b.note || '')}
+      </div>`;
+    }
+    return `<div class="notice warn" style="margin:8px 0 0">
+      ${base}<br><br>
+      当前机制：<b>${esc(b.label || '未知')}</b>。<b>它不保证安全。</b>${esc(b.note || '')}
+      <br><br>想要真正安全，请在 Windows 上运行本程序，或不要勾选这一项。
+    </div>`;
+  }
+
+  // 会话失效的判断不能靠字符串猜。后端现在把 401 明确成 HTTP 401，
+  // 所以优先看状态码；老版本/兜底再退回到关键词（简体「登录」与繁体「登入」都要认）。
+  function isAuthError(err) {
+    if (err && err.status === 401) return true;
+    const m = String((err && err.message) || '');
+    return m.includes('登录') || m.includes('登入') || m.includes('未登录');
+  }
+
   // 视图切换时要回收的监听器。少了它，反复进出阅读器会叠加 keydown 处理器。
   let cleanups = [];
   function onCleanup(fn) { cleanups.push(fn); }
@@ -41,7 +79,10 @@
     if (text) { try { data = JSON.parse(text); } catch { data = null; } }
     if (!res.ok) {
       const detail = (data && (data.detail || data.message)) || `HTTP ${res.status}`;
-      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      // 带上状态码：调用方据 401 判断"登录失效"，比猜错误文案可靠得多
+      err.status = res.status;
+      throw err;
     }
     return data;
   }
@@ -588,8 +629,12 @@
       const sel = document.getElementById('f-folder');
       if (sel) sel.onchange = () => { location.hash = `#/favorites?folder=${encodeURIComponent(sel.value)}`; };
     } catch (err) {
-      if (String(err.message).includes('登录')) {
-        setMain(`<div class="empty">收藏夹需要登录禁漫账号<br><br><a class="btn primary" href="#/settings">去登录</a></div>`);
+      if (isAuthError(err)) {
+        setMain(`<div class="empty">${
+          String(err.message || '').includes('失效')
+            ? '登录已失效，需要重新登录禁漫账号'
+            : '收藏夹需要登录禁漫账号'
+        }<br><br><a class="btn primary" href="#/settings">去登录</a></div>`);
         return;
       }
       throw err;
@@ -850,14 +895,44 @@
       <div class="card">
         <h3>禁漫账号</h3>
         ${acc.logged_in
-          ? `<div class="kv">已登录：${esc(acc.username || '')}</div>
+          ? `<div class="kv">已登录：<b>${esc(acc.username || '')}</b>${
+                acc.login_at
+                  ? ` <span style="color:var(--muted)">（登录于 ${fmtTime(acc.login_at)}）</span>`
+                  : ''
+             }</div>
+             ${acc.expired
+               ? `<div class="notice warn" style="margin:8px 0 0">
+                    登录已失效${acc.invalid_since ? `（${fmtTime(acc.invalid_since)} 检测到）` : ''}。
+                    ${acc.auto_relogin
+                      ? (acc.relogin_blocked
+                          ? '自动重新登录已连续失败多次，已停止尝试 —— 通常是密码改过了，请手动重新登录。'
+                          : '正在尝试自动重新登录…')
+                      : '禁漫的登录状态有效期为几小时，过期后需要重新登录。'}
+                  </div>${acc.last_error ? `<div class="kv" style="color:var(--muted)">原因：${esc(acc.last_error)}</div>` : ''}`
+               : ''}
              <div class="toolbar" style="margin-top:10px"><button class="btn" id="logout">退出登录</button></div>`
-          : `<div class="kv">登录后可以读取你的收藏夹。Cookie 只保存在本地 data/ 目录，不会上传。</div>
+          : `<div class="kv">登录后可以读取你的收藏夹。登录凭据只保存在本地 data/ 目录，不会上传。</div>
              <div class="toolbar" style="margin-top:10px">
                <input id="u" placeholder="用户名" autocomplete="username" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)">
                <input id="p" type="password" placeholder="密码" autocomplete="current-password" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)">
                <button class="btn primary" id="login">登录</button>
-             </div>`}
+             </div>
+             <label class="kv" style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer">
+               <input type="checkbox" id="remember-inline"${acc.auto_relogin ? ' checked' : ''}
+                      style="width:auto;margin:0">
+               记住密码，登录失效后自动重新登录
+             </label>
+             ${rememberNote(acc)}`}
+        ${acc.logged_in ? `
+          <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+            <label class="kv" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="checkbox" id="remember"${acc.auto_relogin ? ' checked' : ''}
+                     style="width:auto;margin:0">
+              记住密码，登录失效后自动重新登录
+            </label>
+            <div class="kv" id="remember-result" style="margin-top:6px"></div>
+            ${rememberNote(acc)}
+          </div>` : ''}
       </div>
 
       <div class="card" style="margin-top:12px">
@@ -933,10 +1008,13 @@
         const username = document.getElementById('u').value.trim();
         const password = document.getElementById('p').value;
         if (!username || !password) { toast('请填写用户名和密码'); return; }
+        const rememberBox = document.getElementById('remember-inline');
         loginBtn.disabled = true;
         try {
-          await apiPost('/api/login', { username, password });
-          toast('登录成功');
+          await apiPost('/api/login', {
+            username, password, remember: !!(rememberBox && rememberBox.checked),
+          });
+          toast(rememberBox && rememberBox.checked ? '登录成功，已记住密码' : '登录成功');
           viewSettings();
         } catch (err) {
           toast(`登录失败：${err.message}`);
@@ -948,8 +1026,23 @@
     if (logoutBtn) {
       logoutBtn.onclick = async () => {
         await apiPost('/api/logout');
-        toast('已退出');
+        toast('已退出，保存的密码也一并清除');
         viewSettings();
+      };
+    }
+    const rememberBox = document.getElementById('remember');
+    if (rememberBox) {
+      rememberBox.onchange = async () => {
+        const out = document.getElementById('remember-result');
+        try {
+          const r = await apiPost('/api/remember', { enabled: rememberBox.checked });
+          out.innerHTML = r.enabled
+            ? '<span style="color:var(--accent)">已开启。会话过期后会尝试自动重新登录。</span>'
+            : '<span style="color:var(--muted)">已关闭，存下来的密码已经清除。</span>';
+        } catch (err) {
+          out.textContent = `保存失败：${err.message}`;
+          rememberBox.checked = !rememberBox.checked;
+        }
       };
     }
 

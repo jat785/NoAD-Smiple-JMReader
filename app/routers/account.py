@@ -13,16 +13,28 @@ router = APIRouter(prefix="/api", tags=["account"])
 class LoginBody(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
+    # 登录时是否顺便把凭据存下来（会话过期后自动重新登录）。默认不存。
+    remember: bool = False
+
+
+class RememberBody(BaseModel):
+    enabled: bool
 
 
 @router.get("/account", summary="当前登录状态")
 def account() -> dict:
-    return {"logged_in": jmclient.is_logged_in(), "username": jmclient.current_user()}
+    """登录状态。
+
+    ``logged_in`` 只代表本地存着一份会话，**不代表服务端还认它**；
+    服务端口径见 ``expired``（某次真实请求拿到 401 之后才会置上）。
+    """
+    return jmclient.session_state()
 
 
-@router.post("/login", summary="登录（Cookie 会持久化到本地）")
+@router.post("/login", summary="登录")
 def login(body: LoginBody) -> dict:
     try:
+        jmclient.set_remember(body.remember)
         return jmclient.login(body.username, body.password)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"登录失败：{exc}") from exc
@@ -32,6 +44,11 @@ def login(body: LoginBody) -> dict:
 def logout() -> dict:
     jmclient.logout()
     return {"ok": True}
+
+
+@router.post("/remember", summary="开关「记住密码」（会话过期后自动重登）")
+def remember(body: RememberBody) -> dict:
+    return {"ok": True, "enabled": jmclient.set_remember(body.enabled)}
 
 
 @router.get("/favorites", summary="收藏夹（需登录）")
