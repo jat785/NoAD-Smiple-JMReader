@@ -42,35 +42,56 @@ run.bat
 ```bash
 git clone <你的仓库地址> JMReader
 cd JMReader
-chmod +x run.sh
 ./run.sh
 ```
+
+> `run.sh` 的可执行位已经存进 git，正常不需要 `chmod`。若因为文件系统（如
+> 某些挂载参数）丢了权限位，`chmod +x run.sh` 一下即可。
+>
+> ⚠️ `run.sh` 目前**未在真实 macOS / Linux 上实测**（本项目的开发和验证环境是
+> Windows）。换行符已由 `.gitattributes` 固定为 LF，静态检查也没有发现问题，
+> 但如果你跑出问题，请提 issue。
 
 看到下面这行就说明起来了，浏览器打开即可：
 
 ```
 JMReader 正在启动 …
-打开浏览器访问： http://127.0.0.1:8756
+本机打开： http://127.0.0.1:8756
 ```
+
+如果你把 `JMREADER_HOST` 改成了 `0.0.0.0`（想让局域网访问），这里会改成列出本机可用的局域网地址 —— 因为 `0.0.0.0` 本身是个"监听所有网卡"的通配地址，**不能拿它当网址打开**。
 
 ### 手动安装（等价于上面的脚本）
 
 ```bash
 # 1. 在项目目录内创建虚拟环境
-python -m venv .venv
+python  -m venv .venv      # Windows
+python3 -m venv .venv      # macOS / Linux（这两台上通常没有 python 这个名字）
 
-# 2. 激活它
-.venv\Scripts\activate        # Windows
-source .venv/bin/activate     # macOS / Linux
+# 2. 不要激活，直接用 venv 里的解释器装依赖
+.venv\Scripts\python.exe -m pip install -r requirements.txt   # Windows
+./.venv/bin/python       -m pip install -r requirements.txt   # macOS / Linux
 
-# 3. 只往这个 venv 里装依赖
-pip install -r requirements.txt
-
-# 4. 启动
-python -m app
+# 3. 启动（同样用 venv 里的解释器）
+.venv\Scripts\python.exe -m app        # Windows
+./.venv/bin/python       -m app        # macOS / Linux
 ```
 
+> Debian / Ubuntu 上如果 `python3 -m venv` 报错说缺少 venv 模块，先装它：
+> `sudo apt install python3-venv`。
+
 > ⚠️ 请不要用 `pip install --user` 或全局 `pip install`。这个项目所有依赖都应当只存在于 `.venv/`。
+>
+> ⚠️ **不要依赖 `activate` 脚本来切换环境**，下面这种写法在 PowerShell 里会静默失效：
+>
+> ```powershell
+> .venv\Scripts\activate        # ← 在 PowerShell 里这样写没有效果
+> pip install -r requirements.txt
+> ```
+>
+> PowerShell 默认的 `PATHEXT` 不含 `.ps1`，所以这行会去执行 `activate.bat`，而批处理是在**子进程**里跑的，它改的 `PATH` 留不在当前会话。结果 `pip install` 落到**全局 pip**、`python -m app` 用上**全局 python** —— 正好是这个项目最不希望你做的事。
+>
+> 一定要激活的话，PowerShell 里用 `.venv\Scripts\Activate.ps1`（可能需要先 `Set-ExecutionPolicy -Scope Process RemoteSigned`）。但上面那种"直接用 venv 里的解释器"的写法更省心，也不依赖 shell 类型。
 
 ## 配置
 
@@ -80,16 +101,24 @@ python -m app
 |---|---|---|
 | `JMREADER_HOST` | `127.0.0.1` | 想让局域网手机访问就改成 `0.0.0.0` |
 | `JMREADER_PORT` | `8756` | 端口 |
-| `JMREADER_DATA_DIR` | `./data` | 数据目录（Cookie、数据库、下载内容） |
+| `JMREADER_DATA_DIR` | `./data` | 数据目录（数据库、缓存、下载内容） |
 | `JMREADER_PROXY` | 空 | 留空 = 自动探测系统代理 |
 | `JMREADER_DOWNLOAD_CONCURRENCY` | `1` | 同时下载的任务数，**建议保持 1** |
 | `JMREADER_DOWNLOAD_INTERVAL` | `1.2` | 每张图之间的间隔（秒） |
+| `JMREADER_DOWNLOAD_MAX_RETRY` | `3` | 单页失败后的最大重试次数 |
 | `JMREADER_HOME_RANDOM_COUNT` | `10` | 默认页随机几部 |
 | `JMREADER_HOME_POOL_SOURCES` | `5` | 随机池额外抓几个「随机分类 × 随机页」，设 0 就只用官方推荐位 |
 | `JMREADER_HOME_POOL_MAX_PAGE` | `30` | 随机页的页码上限 |
+| `JMREADER_RANDOM_POOL_TTL` | `21600` | 随机池缓存（秒），会落盘 |
 | `JMREADER_MIN_REQUEST_INTERVAL` | `0.2` | **全局限速**：两次上游请求的最小间隔（秒），0 表示不限 |
 | `JMREADER_CATEGORIES_TTL` | `21600` | 分类树缓存（秒） |
 | `JMREADER_ALBUM_TTL` | `1800` | 详情/搜索/排行缓存（秒） |
+| `JMREADER_PHOTO_META_TTL` | `1800` | 章节详情的内存缓存（秒） |
+| `JMREADER_PAGE_CACHE_MAX_FILES` | `3000` | 在线看图缓存的文件数上限 |
+| `JMREADER_COVER_CACHE_MAX_FILES` | `4000` | 封面缓存的文件数上限 |
+| `JMREADER_SQLITE_JOURNAL` | 空（自动） | 强制 SQLite 日志模式，填 `wal` 或 `delete`。**一般不用动**，见下方「数据库与存储」 |
+
+> 设置页里改的代理存在数据库里，**优先级高于 `.env`**。
 
 ## 目录结构
 
@@ -103,7 +132,8 @@ JMReader/
 │   │   ├── browse.py          首页、搜索、分类、详情、图片代理
 │   │   ├── account.py         登录、收藏夹
 │   │   ├── history.py         本地观看历史
-│   │   └── library.py         下载任务 + 本地已下载库
+│   │   ├── library.py         下载任务 + 本地已下载库
+│   │   └── settings.py        代理配置、访问地址、运行统计
 │   └── services/
 │       ├── jmclient.py        与禁漫通信的唯一出口（基于 jmcomic）
 │       └── downloader.py      单 worker 下载队列 + ZIP 打包
@@ -112,9 +142,11 @@ JMReader/
 │   ├── style.css
 │   └── app.js
 ├── data/                      运行期数据，已在 .gitignore 中
-│   ├── jmreader.db
-│   ├── cookies.json           ← 登录凭据，绝不提交
-│   ├── cache/                 封面与在线看图的缓存
+│   ├── jmreader.db            索引 + 观看历史 + 登录凭据（kv 表）
+│   ├── cache/
+│   │   ├── covers/            封面缓存
+│   │   ├── pages/             在线看图缓存
+│   │   └── tmp/               解扰过程中的临时文件
 │   └── downloads/<id>_<标题>/
 │       ├── 01_第01话.zip
 │       ├── metadata.json
@@ -124,14 +156,20 @@ JMReader/
 └── .env.example
 ```
 
+> **登录凭据没有单独的文件** —— Cookie 存在 `data/jmreader.db` 的 `kv` 表里（键 `session`）。
+> 所以要备份或清除登录状态，处理 `jmreader.db` 就够了。
+
 ## 接口一览
 
 启动后打开 `http://127.0.0.1:8756/docs` 可以看到完整的 Swagger 文档。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/api/health` | 健康检查 + 上游请求统计 + 存储状态 |
 | GET | `/api/home` | 默认页：随机 N 部 |
+| GET | `/api/random` | 再来一批随机漫画 |
 | GET | `/api/search` | 搜索（`q` `by` `order` `time` `page`） |
+| GET | `/api/lookup/{jm_id}` | 按 JM 号（车牌号）精确定位 |
 | GET | `/api/tags` | 内置标签表（禁漫自己的 4 个分组，共 47 个标签） |
 | GET | `/api/tag-search` | 多标签筛选（`tags` 逗号分隔、`mode=and\|or`） |
 | GET | `/api/categories` | 分类树 + 标签区块 |
@@ -142,10 +180,15 @@ JMReader/
 | GET | `/api/cover/{id}` | 封面（后端代理） |
 | GET/POST | `/api/account` `/api/login` `/api/logout` | 账号 |
 | GET | `/api/favorites` | 收藏夹 |
-| GET/POST/DELETE | `/api/history` | 本地观看历史 |
-| POST/GET/DELETE | `/api/download` `/api/download/tasks` | 下载任务 |
+| GET/POST/DELETE | `/api/history` `/api/history/{id}` | 本地观看历史 |
+| POST/GET | `/api/download` `/api/download/tasks` | 下载任务 |
+| DELETE | `/api/download/tasks/{id}` | 取消下载任务 |
 | GET/DELETE | `/api/library` `/api/library/{id}` | 本地已下载库 |
 | POST | `/api/library/rescan` | 重新扫描下载目录，修复索引 |
+| GET | `/api/library/{id}/cover` | 本地封面 |
+| GET | `/api/library/{id}/{chapter}/page/{n}` | 读取本地 ZIP 里的某一页 |
+| GET/POST | `/api/settings` `/api/settings/proxy` | 代理设置与运行统计 |
+| POST | `/api/settings/proxy/test` | 测试当前设置能否连通禁漫 |
 
 ## 几个设计决定（以及为什么）
 
@@ -277,7 +320,53 @@ jmcomic 有两个坑叠在一起，值得写下来免得后人重踩：
 `GET /api/health` 会返回 `upstream_requests` / `requests_per_hour`，
 你可以随时自己核对这个项目到底给站点添了多少负担。
 
-**
+**数据库与存储（踩坑记录：WAL 与 NAS）**
+
+本地库索引、观看历史、登录凭据都存在 `data/jmreader.db` 这一个 SQLite 文件里。
+SQLite 默认想用 **WAL（预写式日志）** 模式，但它有个硬性前提：
+
+> **WAL does not work over a network filesystem.**
+> All processes using a database must be on the same host computer.
+> —— sqlite.org/wal.html
+
+WAL 依赖 `-shm` 文件上的**共享内存**和可靠的文件锁来协调读写。网络共享
+（SMB/CIFS、NFS）、部分 NAS 的"资源库"卷、部分容器 volume 上，这套机制会
+**静默失效**：写入确实进了 `-wal`，但读连接一直停在旧快照上。
+
+我们在一台 WinNAS 上实测到过完整的事故链：
+
+1. 扫描报告 `added=5`，列表却永远只显示 2 部，`GET /api/library` 连打 20 次都不变
+2. 把数据库拉下来直接查，同一张表、同一条连接，前后两条语句结果不同：
+   `ORDER BY downloaded_at DESC` 得到 2 行，全表扫描得到 5 行
+3. `PRAGMA integrity_check` 给出答案 —— **索引与表不同步**：
+   `wrong # of entries in index idx_dl_album_time`
+
+**数据一条没丢，坏的是索引**，而走索引的查询不会报错、只是少返回行。
+所以现在启动时会做两件事：
+
+- **日志模式自检**：写完一行立刻读回来。读得到才用 WAL，读不到就自动退回
+  不依赖共享内存的 **rollback journal**（`journal_mode=DELETE`）。数据目录在
+  本地盘时仍然用 WAL，不会有性能损失。
+- **完整性自检**：`PRAGMA quick_check` 发现索引损坏就自动 `REINDEX` 修回来。
+
+两者都会出现在 `GET /api/health` 的 `storage` 段里：
+
+```json
+"storage": {
+  "db_path": ".../data/jmreader.db",
+  "download_dir": ".../data/downloads",
+  "journal_mode": "WAL",
+  "repair_notes": []
+}
+```
+
+`journal_mode` 显示 `DELETE` 不是故障，是自检发现这块盘撑不住 WAL 后**按预期降级**；
+`repair_notes` 非空说明数据库曾经坏过、已被自动修复。真出问题时可以临时用
+`JMREADER_SQLITE_JOURNAL=wal|delete` 强制指定模式来排查。
+
+> ⚠️ 由此引申出一条操作守则：**不要用另一台电脑通过网络去读写正在被使用的
+> `jmreader.db`**。需要查看就先把文件复制出来看副本 —— 这正是上面那条
+> "all processes must be on the same host" 的意思。
 
 **为什么"随机 10 部"要自己造池子？**
 禁漫的 `/random_recommend` 只看名字像随机，实测它**固定返回 30 条，而且短时间内

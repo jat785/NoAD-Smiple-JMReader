@@ -63,7 +63,9 @@ DATA_DIR = _env_path("JMREADER_DATA_DIR", BASE_DIR / "data")
 DOWNLOAD_DIR = DATA_DIR / "downloads"
 CACHE_DIR = DATA_DIR / "cache"
 DB_PATH = DATA_DIR / "jmreader.db"
-COOKIE_PATH = DATA_DIR / "cookies.json"
+# 登录凭据（Cookie）没有单独的文件，就存在 DB_PATH 的 kv 表里（键 "session"）。
+# 这里曾经有过一个 COOKIE_PATH = DATA_DIR / "cookies.json"，但它从来没有
+# 被任何代码用过 —— 只会让人以为备份/清理凭据要动两个地方。
 WEB_DIR = BASE_DIR / "web"
 
 # ---------------------------------------------------------------- 服务
